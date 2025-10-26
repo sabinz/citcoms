@@ -866,6 +866,8 @@ def get_slab_center_dist( depth_km, start_depth, slab_dip, roc,
         dist = (dist - 60) / 110.0 # units are equatorial degrees
     else:
         dist /= 110.0
+        
+    if verbose: print( now(), 'The distance is: ',dist )
 
     return dist
 
@@ -1585,7 +1587,8 @@ def make_flat_slab_temperature_xyz( master, kk ):
 
     '''Description.'''
 
-    if verbose: print( now(), 'make_flat_slab_temperature_xyz:' )
+    #if verbose: print( now(), 'make_flat_slab_temperature_xyz:' )
+    print( now(), 'make_flat_slab_temperature_xyz:' )
 
     coor_d = master['coor_d']
     control_d = master['control_d']
@@ -1707,6 +1710,202 @@ def make_pdf_from_ps_list( ps_list, filename ):
 
     return filename
 
+#=====================================================================
+#=====================================================================
+#=====================================================================
+## Make weak interface - Andres
+#=====================================================================
+def make_weakInterface_xyz( master, kk ):
+
+    '''Description.'''
+
+    if verbose: print( now(), 'make_weak_interface_xyz:' )
+    
+    print( now(), 'make_weak_interface_xyz:' )
+
+    coor_d = master['coor_d']
+    control_d = master['control_d']
+    func_d = master['func_d']
+    age = str(control_d['age'])
+    grid_dir = control_d['grid_dir']
+    pid_d = master['pid_d']
+    rm_list = func_d['rm_list']
+
+    # parameters from dictionaries
+    depth_km = coor_d['depth_km'][kk] # km
+    depth = coor_d['depth'][kk] # non-dim
+    UM_depth = control_d['UM_depth']
+    if depth_km < UM_depth: advection = control_d['UM_advection']
+    else: advection = control_d['LM_advection']
+    gmt_char = control_d['gmt_char']
+    lith_age_min = control_d['lith_age_min']
+    oceanic_lith_age_max = control_d['oceanic_lith_age_max']
+    myr2sec = pid_d['myr2sec']
+    N_slab_pts = control_d['N_slab_pts']
+    radius_km = pid_d['radius_km']
+    roc = control_d['radius_of_curvature']
+    scalet = pid_d['scalet']
+    slab_age_xyz = func_d['slab_age_xyz']
+    spacing_slab_pts = control_d['spacing_slab_pts']
+    stencil_depth_min = control_d['stencil_depth_min']
+    stencil_width = control_d['stencil_width']
+    stencil_width_smooth = control_d['stencil_width_smooth']
+    temperature_mantle = control_d['temperature_mantle']
+    temperature_min = control_d['temperature_min']
+    thermdiff = pid_d['thermdiff']
+    vertical_slab_depth = control_d['vertical_slab_depth']
+
+    # slab temperature
+    temp_xyz  = grid_dir + '/weaktemp' + control_d['suffix'] + 'xyz'
+    rm_list.append( temp_xyz )
+    out_file = open( temp_xyz, 'w' )
+
+    # slab stencil
+    sten_xyz = grid_dir + '/weaksten' + control_d['suffix'] + 'xyz'
+    rm_list.append( sten_xyz )
+    out_file2 = open( sten_xyz, 'w' )
+
+    # degrees are `equatorial' (relevant for longitude)
+    startval = -0.5*((N_slab_pts-1)*spacing_slab_pts)
+    d_p_degrees = [startval+ii*spacing_slab_pts for ii in range(N_slab_pts)]
+    d_p = [abs(ii*(110.0/radius_km)) for ii in d_p_degrees] # non-dim
+
+#    if verbose: print( now(), 'd_p_degrees', d_p_degrees )
+#    if verbose: print( now(), 'd_p', d_p )
+    
+    ##ALL OF THESE ARE PURE CONSTANTS
+#    print( now(), 'd_p_degrees', d_p_degrees )
+#    print( now(), 'd_p', d_p )
+#    print( now(), 'N_slab_pts', N_slab_pts)
+#    print( now(), 'spacing_slab_pts', spacing_slab_pts)
+#    print( now(), 'start_val', startval )
+
+    for line in open( slab_age_xyz ):
+        # header line
+        if line.startswith( gmt_char ):
+            line_segments = line.split(' ')
+            for seg in line_segments:
+                # subduction zone polarity
+                # already checked in get_slab_data(), but let us check again!
+                if seg == 'sR' or seg == '>sR':
+                    polarity = 'R'
+                elif seg == 'sL' or seg == '>sL':
+                    polarity = 'L'
+
+                if seg.startswith('DEPTH='):
+                    slab_depth = float(seg.lstrip('DEPTH=') )
+                if seg.startswith('DIP='):
+                    slab_dip = float(seg.lstrip('DIP=') )
+                    slab_dip = np.radians(slab_dip) # to radians
+                if seg.startswith('START_DEPTH='):
+                    start_depth = float(seg.lstrip('START_DEPTH=') )
+            
+            if polarity != 'R' and polarity != 'L':
+                errorline = line.rstrip('\n')
+                print( now(), errorline )
+                print( now(), 'ERROR: cannot determine subduction zone polarity' )
+                sys.exit(1)
+
+            dist = get_slab_center_dist( depth_km, start_depth, slab_dip, roc,
+                       vertical_slab_depth )
+            data_list = []
+
+            # 1/2 because a boundary layer is created on each side of the slab
+            # 1/sin(dip) to conserve down-dip buoyancy
+            # temperature_mantle-temperature_min is temperature drop
+            dT = (temperature_mantle-temperature_min) / (2*np.sin( slab_dip ))
+
+            sten_depth, sten_smooth = \
+                get_stencil_depth_and_smooth( control_d, slab_depth )
+            # minimum depth for stencil for cleaner subduction
+            # initiation
+            sten_depth = max( sten_depth, stencil_depth_min )
+            # extra 25 km to ensure all thermal anomaly is included
+            max_stencil_depth = sten_depth + sten_smooth + 25
+
+        # coordinate line
+        else:
+            lon, lat, dummy, age = line.split()
+            data_list.append( (float(lon), float(lat), float(age)) )
+            if len( data_list ) < 3 : continue
+
+            clon, clat, cage = data_list[-1] # current data
+            plon, plat, page = data_list[-2] # previous data
+            pplon, pplat, ppage = data_list[-3] # previous previous data
+            dx = clon - pplon # for approx gradient about previous data
+            dy = clat - pplat # for approx gradient about previous data
+            # grdtrack can produce some negative values due to interpolation
+            # use min and max oceanic ages to ensure a positive age
+            # and also be compatible with the user's parameter choice
+            page = max( page, lith_age_min )
+            page = min( page, oceanic_lith_age_max )
+            
+            #dd = 1 / (2 *np.sqrt( page / scalet )) #This is the 1/2*(1/sqrt(age)) - Half space equation
+            #### Making the age constant
+            age_weak_ = 1 # Ma
+            dd = 1 / (2 *np.sqrt( age_weak_ / scalet )) #This is the 1/2*(1/sqrt(age)) - Half space equation
+            scale_dist =1
+            
+            for ii in range( N_slab_pts ):
+
+                dist2 = (dist + advection*d_p_degrees[ii]) + (dist*scale_dist)    #Andres - Weak subduction interface
+                nlon, nlat = get_point_normal_to_subduction_zone(
+                                 plon, plat, dx, dy, dist2, polarity )
+
+                # stencil
+                if depth_km >= start_depth and depth_km <= max_stencil_depth:
+
+                    # horizontal (lateral) direction
+                    smooth = stencil_width_smooth/6371
+                    twidth = stencil_width/2/6371
+                    arg = ( d_p[ii]-twidth ) / smooth
+                    sten_val = 0.5 * (1-np.tanh(arg))
+
+                    # vertical (depth) direction
+                    smooth = sten_smooth / radius_km
+                    tdepth = sten_depth / radius_km
+                    arg = ( depth-tdepth ) / smooth
+                    sten_val *= 0.5 * (1-np.tanh(arg))
+
+                    out_line = '%(nlon)g %(nlat)g %(sten_val)g\n' % vars()
+                    out_file2.write( out_line )
+
+
+                # temperature
+                if depth_km >= start_depth and depth_km <= slab_depth:
+                    ## ERFC calculation of the lithosphere thermal structure
+                    slab_temp = temperature_mantle - dT * erfc( dd*d_p[ii] )
+                    
+                    if depth_km <= 125.0:
+                        # Perpendicular distance from slab centre in km (~110 km per degree)
+                        print( now(), 'Here we are weakening the subduction channel at depth = \n',str(depth_km)+" ",str(perp_km) )
+                        # Smoothly taper anomaly over ~20 % of the 45 km band
+                        smooth_km = 45.0 / 9.0  # ≈ 5 km
+                        arg_p = perp_km / smooth_km
+                        # Apply ~8 % boost of mantle temperature
+                        temp_boost = 0.08 * temperature_mantle * (1.0 - np.tanh(arg_p))
+                        slab_temp = slab_temp  + temp_boost
+                        
+                    # prevent overprinting of pre-existing slabs
+                    frac = (slab_temp - temperature_mantle)
+                    frac /= temperature_mantle
+                    frac *= 100 # to percentage
+                    #if frac <= -5: # more than 5% temperature contrast
+                    if frac <= -5.0 or frac >= 2.5:
+                        if frac >=0:
+                            print( now(), 'Here we passed the pre-existing slab filter and the anomaly is positive as expected \n',str(frac) )
+                        out_line = '%(nlon)g %(nlat)g %(slab_temp)g\n' % vars()
+                        out_file.write( out_line )
+
+
+    out_file.close()
+    out_file2.close()
+
+    return ( temp_xyz, sten_xyz )
+#=====================================================================
+#=====================================================================
+
+
 #====================================================================
 #====================================================================
 #====================================================================
@@ -1759,12 +1958,21 @@ def make_slab_temperature_xyz( master, kk ):
     out_file2 = open( sten_xyz, 'w' )
 
     # degrees are `equatorial' (relevant for longitude)
+    #N_slab_pts = N_slab_pts * 2 #Andres - wider slab oceanwards
     startval = -0.5*((N_slab_pts-1)*spacing_slab_pts)
-    d_p_degrees = [startval+ii*spacing_slab_pts for ii in range(N_slab_pts)]
-    d_p = [abs(ii*(110.0/radius_km)) for ii in d_p_degrees] # non-dim 
+    d_p_degrees = np.array([startval+ii*spacing_slab_pts for ii in range(N_slab_pts)])#*2 # Andres - double up slab width
+    #d_p_degrees = [val for val in d_p_degrees if val <= 3.765] # Andres- Take just half of the SP part
+    d_p = [abs(ii*(110.0/radius_km)) for ii in d_p_degrees] # non-dim
 
     if verbose: print( now(), 'd_p_degrees', d_p_degrees )
     if verbose: print( now(), 'd_p', d_p )
+    
+    ##ALL OF THESE ARE PURE CONSTANTS
+#    print( now(), 'd_p_degrees', d_p_degrees )
+#    print( now(), 'd_p', d_p )
+#    print( now(), 'N_slab_pts', N_slab_pts)
+#    print( now(), 'spacing_slab_pts', spacing_slab_pts)
+#    print( now(), 'start_val', startval )
 
     for line in open( slab_age_xyz ):
         # header line
@@ -1799,7 +2007,8 @@ def make_slab_temperature_xyz( master, kk ):
             # 1/2 because a boundary layer is created on each side of the slab
             # 1/sin(dip) to conserve down-dip buoyancy
             # temperature_mantle-temperature_min is temperature drop
-            dT = (temperature_mantle-temperature_min) / (2*np.sin( slab_dip ))
+            #dT = (temperature_mantle-temperature_min) / (2*np.sin( slab_dip ))
+            dT = 2 * (temperature_mantle-temperature_min) / (np.sin( slab_dip )) #Andres - Make that slab colder
 
             sten_depth, sten_smooth = \
                 get_stencil_depth_and_smooth( control_d, slab_depth )
@@ -1825,7 +2034,7 @@ def make_slab_temperature_xyz( master, kk ):
             # and also be compatible with the user's parameter choice
             page = max( page, lith_age_min )
             page = min( page, oceanic_lith_age_max )
-            dd = 1 / (2 *np.sqrt( page / scalet ))
+            dd = 1 / (2 *np.sqrt( page / scalet )) #This is the 1/2*(1/sqrt(age)) - Half space equation
 
             for ii in range( N_slab_pts ):
 
@@ -1854,8 +2063,10 @@ def make_slab_temperature_xyz( master, kk ):
 
                 # temperature
                 if depth_km >= start_depth and depth_km <= slab_depth:
+                    ## ERFC calculation of the lithosphere thermal structure
+                    #print(now(),"so here we go ",temperature_mantle , dT, temperature_mantle -dT,erfc( dd*d_p[ii] ) )
+                    #sys.exit(1)
                     slab_temp = temperature_mantle - dT * erfc( dd*d_p[ii] )
-
                     # prevent overprinting of pre-existing slabs
                     frac = (slab_temp - temperature_mantle)
                     frac /= temperature_mantle

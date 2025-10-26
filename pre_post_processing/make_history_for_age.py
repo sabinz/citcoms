@@ -55,7 +55,7 @@ where:
 #====================================================================
 def main():
 
-    logging.basicConfig(level=logging.INFO, 
+    logging.basicConfig(level=logging.INFO,
             format='%(asctime)s %(levelname)-8s %(message)s')
 
     '''Main sequence of script actions.'''
@@ -135,7 +135,7 @@ def main():
         min = control_d['temperature_min']
         max = control_d['temperature_max']
         temp_grids = [grid[0] for grid in grids]
-        func_d['temp_by_cap'] = track_grids_to_cap_list( master_d, 
+        func_d['temp_by_cap'] = track_grids_to_cap_list( master_d,
                                     temp_grids, background, min, max )
 
     if OUTPUT_TEMP:
@@ -144,7 +144,7 @@ def main():
         min = control_d['stencil_min']
         max = control_d['stencil_max']
         sten_grids = [grid[1] for grid in grids]
-        func_d['sten_by_cap'] = track_grids_to_cap_list( master_d, 
+        func_d['sten_by_cap'] = track_grids_to_cap_list( master_d,
                                     sten_grids, background, min, max )
 
     
@@ -174,10 +174,10 @@ def get_depth_for_looping( control_d ):
     '''determine the depth necessary for looping to build slabs given 
        the user-specified parameters'''
 
-    # this parameter is created by get_slab_data() and gives the 
+    # this parameter is created by get_slab_data() and gives the
     # maximum depth of a slab for the line data and parameters
     # selected by the user.  If get_slab_data has not been called
-    # then the user does not want to build slabs and 
+    # then the user does not want to build slabs and
     # control_d['slab_depth_gen'] has not been defined
     slab_depth_gen = control_d.setdefault('slab_depth_gen',0)
     stencil_depth_max = control_d['stencil_depth_max']
@@ -205,14 +205,14 @@ def basic_setup(cfg_filename, age, IC):
     '''Read parameters from input files and set defaults.'''
 
     # master dictionary for all settings
-    master = {} 
+    master = {}
 
     # read settings from control file
     control_d = Core_Util.parse_configuration_file( cfg_filename )
 
     set_verbose( control_d )
 
-    master['control_d'] = control_d 
+    master['control_d'] = control_d
 
     # update with parameters from geodynamic framework
     geoframe_d = Core_Util.parse_geodynamic_framework_defaults()
@@ -352,6 +352,10 @@ def build_slab_temperature( master, kk, mantle_xyzs ):
     # exit
     depth_km = coor_d['depth_km'][kk]
     if depth_km > control_d['slab_depth_gen']: return ( None, None )
+    
+    #Stop slab assimilation below this depth
+    if control_d['MAX_ASSIMILATION_DEPTH']:
+        if depth_km > control_d['MAX_ASSIMILATION_DEPTH']: return ( None, None )
 
     # advection factor
     if depth_km < control_d['UM_depth']: advection = control_d['UM_advection']
@@ -406,6 +410,367 @@ def build_slab_temperature( master, kk, mantle_xyzs ):
         callgmt( 'grdclip', cmd, '', '', '-G' + grid )
 
     return tuple( slab_grids )
+
+#=====================================================================
+#=====================================================================
+#=====================================================================
+def include_weak_interface( master,master_grids,master_node_points, kk):
+    '''Include the thermal profile of the lithosphere according to a 
+    constant age that produces a low viscosity. An age of 1 Ma is chosen
+     N.B. This function actually
+      is based on the include_lithosphere_fn.'''
+
+    if verbose: print( now(), 'include_weak_interfac:' )
+    print( now(), 'include_weak_interfac:' )
+
+    control_d = master['control_d']
+    coor_d = master['coor_d']
+    func_d = master['func_d']
+    pid_d = master['pid_d']
+    age = str(control_d['age'])
+    grid_dir = control_d['grid_dir']
+    scalet = pid_d['scalet']
+    rm_list = func_d['rm_list']
+    suffix = control_d['suffix']
+    
+    ####################################################################################################
+    #################### From the make_slab_temperature_xyz fn - Andres weak interface
+    UM_depth = control_d['UM_depth']
+
+    gmt_char = control_d['gmt_char']
+    lith_age_min = control_d['lith_age_min']
+    oceanic_lith_age_max = control_d['oceanic_lith_age_max']
+    myr2sec = pid_d['myr2sec']
+    N_slab_pts = control_d['N_slab_pts']
+    radius_km = pid_d['radius_km']
+    roc = control_d['radius_of_curvature']
+    scalet = pid_d['scalet']
+    slab_age_xyz = func_d['slab_age_xyz']
+    spacing_slab_pts = control_d['spacing_slab_pts']
+    
+    stencil_depth_min = control_d['stencil_depth_min']
+    stencil_width = control_d['stencil_width']#/2
+    stencil_width_smooth = control_d['stencil_width_smooth']#/2
+    
+    temperature_mantle = control_d['temperature_mantle']
+    temperature_min = control_d['temperature_min']
+    thermdiff = pid_d['thermdiff']
+    vertical_slab_depth = control_d['vertical_slab_depth']
+    
+    grd_res = str(control_d['grd_res'])
+    R = 'g'
+    ####################################################################################################
+    spacing_bkg_pts = control_d['spacing_bkg_pts']
+
+    #stencil_max = control_d['stencil_max']
+    #stencil_min = control_d['stencil_min']
+    #stencil_filter_width = control_d['stencil_filter_width']
+    stencil_filter_width = str(control_d['stencil_filter_width'])
+    filter_width = str(control_d['filter_width'])
+    stencil_max = str(control_d['stencil_max'])
+    stencil_min = str(control_d['stencil_min'])
+    temperature_mantle = str(control_d['temperature_mantle'])
+    temperature_min = str(control_d['temperature_min'])
+    tension = str(control_d['tension'])
+    
+#    print( now(), 'The stencil parameters are: {0} {1} {2} {3}'.format(str(stencil_filter_width), #110.0 55.0 1.0 0.0
+#                                                                str(filter_width),
+#                                                                str(stencil_max),
+#                                                                str(stencil_min)))
+    
+    depth_km = coor_d['depth_km'][kk]
+    
+    if depth_km < UM_depth: advection = control_d['UM_advection']
+    else: advection = control_d['LM_advection']
+
+    
+    ## Check that we are not below the LAB of the specific lithosphere in the current nodes
+    # do nothing and exit
+    print( now(), 'The lithosphere depth here, apparently, is:  ',control_d['lith_depth_gen'])
+    
+    #if depth_km > control_d['lith_depth_gen']: return (None,None)
+    if depth_km > 16: return (None,None) #Andres- Dont use this approach below 16 km, since its managed by the continental grids post-processing script
+    # else include lithosphere
+    depth = coor_d['depth'][kk]
+    
+    lithos_depth = float(control_d['lith_depth_gen'])
+
+    # slab temperature
+    weak_temp_xyz  = grid_dir + '/weaktemp' + control_d['suffix'] + 'xyz'
+    rm_list.append( weak_temp_xyz )
+    out_file = open( weak_temp_xyz, 'w' )
+
+    # slab stencil
+    sten_xyz = grid_dir + '/weaksten' + control_d['suffix'] + 'xyz'
+    rm_list.append( sten_xyz )
+    out_file2 = open( sten_xyz, 'w' )
+
+    # degrees are `equatorial' (relevant for longitude)
+    startval = -0.5*((N_slab_pts-1)*spacing_slab_pts)
+    d_p_degrees = [startval+ii*spacing_slab_pts for ii in range(N_slab_pts)]
+    
+    d_p_degrees = [val for val in d_p_degrees if val >= 0] #Just take half of the distances - option 1
+    #d_p_degrees = [val+abs(startval) for val in d_p_degrees if val >= 0] #Just take half of the distances - option 2
+    
+    #d_p_degrees = [val for val in d_p_degrees if val <= 4] # remove values between 3 and 3.75. Narrow channel - TOO THIN -6 is too thick
+    
+    d_p_degrees = [val for val in d_p_degrees if val <= 5] # remove values between 3 and 3.75. Narrow channel
+    
+    d_p = [abs(ii*(110.0/radius_km)) for ii in d_p_degrees] # non-dim
+    ####################################################################################################
+    #### FIXED age for the weak subduction interface region -
+    fix_age = 1 #Ma
+    ####################################################################################################
+#    print(now(), 'These are the values of all variables : ')
+#    print(now(),slab_age_xyz,age,grid_dir,scalet,UM_depth,gmt_char,gmt_char,lith_age_min,
+#     oceanic_lith_age_max,myr2sec,N_slab_pts,radius_km,roc,scalet,spacing_slab_pts,
+#     thermdiff,vertical_slab_depth,grd_res,spacing_bkg_pts,stencil_depth_min,stencil_width,
+#     stencil_width_smooth,stencil_filter_width,filter_width,stencil_max,stencil_min,
+#     temperature_mantle,temperature_min,tension,depth_km  )
+     
+    #sys.exit(1)
+    #print(now(), 'These are the values of all variables : ')
+    #print(now(),slab_age_xyz)
+    
+    #sys.exit(1)
+    
+    
+    for line in open( slab_age_xyz ):
+        # header line
+        if line.startswith( gmt_char ):
+            line_segments = line.split(' ')
+            for seg in line_segments:
+                # subduction zone polarity
+                # already checked in get_slab_data(), but let us check again!
+                if seg == 'sR' or seg == '>sR':
+                    polarity = 'R'
+                elif seg == 'sL' or seg == '>sL':
+                    polarity = 'L'
+
+                if seg.startswith('DEPTH='):
+                    slab_depth = float(seg.lstrip('DEPTH=') )
+                if seg.startswith('DIP='):
+                    slab_dip = float(seg.lstrip('DIP=') )
+                    slab_dip = np.radians(slab_dip) # to radians
+                if seg.startswith('START_DEPTH='):
+                    start_depth = float(seg.lstrip('START_DEPTH=') )
+            
+            if polarity != 'R' and polarity != 'L':
+                errorline = line.rstrip('\n')
+                print( now(), errorline )
+                print( now(), 'ERROR: cannot determine subduction zone polarity' )
+                sys.exit(1)
+
+            dist = Core_Util.get_slab_center_dist( depth_km, start_depth, slab_dip, roc,
+                       vertical_slab_depth )
+            data_list = []
+
+            # 1/2 because a boundary layer is created on each side of the slab
+            # 1/sin(dip) to conserve down-dip buoyancy
+            # temperature_mantle-temperature_min is temperature drop
+            dT = (float(temperature_mantle) - float(temperature_min)) / (2*np.sin( slab_dip ))
+
+            sten_depth, sten_smooth = \
+                Core_Util.get_stencil_depth_and_smooth( control_d, slab_depth )
+            # minimum depth for stencil for cleaner subduction
+            # initiation
+            sten_depth = max( sten_depth, stencil_depth_min )
+            # extra 25 km to ensure all thermal anomaly is included
+            max_stencil_depth = sten_depth + sten_smooth + 25
+
+        # coordinate line
+        else:
+            lon, lat, dummy, age = line.split()
+            data_list.append( (float(lon), float(lat), float(age)) )
+            if len( data_list ) < 3 : continue
+
+            clon, clat, cage = data_list[-1] # current data
+            plon, plat, page = data_list[-2] # previous data
+            pplon, pplat, ppage = data_list[-3] # previous previous data
+            dx = clon - pplon # for approx gradient about previous data
+            dy = clat - pplat # for approx gradient about previous data
+            # grdtrack can produce some negative values due to interpolation
+            # use min and max oceanic ages to ensure a positive age
+            # and also be compatible with the user's parameter choice
+            page = max( page, lith_age_min )
+            page = min( page, oceanic_lith_age_max )
+            
+            #dd = 1 / (2 *np.sqrt( page / scalet )) #This is the 1/2*(1/sqrt(age)) - Half space equation
+            #### Making the age constant
+            age_weak_ = fix_age # Ma
+            dd = 1 / (2 *np.sqrt( age_weak_ / scalet )) #This is the 1/2*(1/sqrt(age)) - Half space equation
+            scale_dist =2
+            
+            check_file1 = False
+            check_file2 = False
+            
+            for ii in range( len(d_p) ):
+                
+                dist2 = (dist + advection*d_p_degrees[ii]) #+ (dist*scale_dist)    #Andres - Weak subduction interface
+                nlon, nlat = Core_Util.get_point_normal_to_subduction_zone(
+                                 plon, plat, dx, dy, dist2, polarity )
+                                 
+                #We have both the polarity and the location of the boundary in the overriding plate (displaced perpendicular to trenches)
+
+                # stencil of weak interface in the Overriding plate -
+                #if depth_km >= start_depth and depth_km <= max_stencil_depth:
+                if depth_km <= lithos_depth:
+
+                    # horizontal (lateral) direction
+                    smooth = stencil_width_smooth/6371
+                    twidth = stencil_width/2/6371
+                    arg = ( d_p[ii]-twidth ) / smooth
+                    sten_val = 0.5 * (1-np.tanh(arg))
+
+                    # vertical (depth) direction
+                    smooth = sten_smooth / radius_km
+                    tdepth = sten_depth / radius_km
+                    arg = ( depth-tdepth ) / smooth
+                    sten_val *= 0.5 * (1-np.tanh(arg))
+                    
+                    #I think this file has to be written anyway..?? - These files will die after GMT computations are done
+                    out_line = '%(nlon)g %(nlat)g %(sten_val)g\n' % vars()
+                    out_file2.write( out_line )
+                    
+                    check_file1 = True
+
+
+                # temperature
+                #if depth_km >= start_depth and depth_km <= slab_depth:
+                if depth_km <= lithos_depth: #The channel only is relevant between 0-100 km depth (+25 km to capture the thermal boundary layer)
+                    ## ERFC calculation of the lithosphere thermal structure - Following the radious of curvature
+                    #print(now(), 'Checking computation of weakL-temperature grid :', type(temperature_mantle),type(dT),type(dd),type(d_p[ii]))
+                    weakL_temp = float(temperature_mantle) - dT * Core_Util.erfc( dd*d_p[ii] )
+                    
+                    #print( now(), 'The calculate weak temperature interface is: ',  str(weakL_temp)," at depth ",str(depth_km))
+                    #if depth_km <= 125.0:
+                    # Perpendicular distance from slab centre in km (~110 km per degree)
+                    #print( now(), 'Here we are weakening the subduction channel at depth = \n',str(depth_km) )
+                    # prevent overprinting of pre-existing slabs
+                    t_mantle= float(temperature_mantle)
+                    frac = (weakL_temp - t_mantle)
+                    frac /= t_mantle
+                    frac *= 100 # to percentage
+                    #if frac >= 2: # Override the weak layer if its thermal structure cools too much
+                    #print( now(), 'Here we are overriding the the subduction channel and the temperature and fraction is %: ',frac)
+                    out_line = '%(nlon)g %(nlat)g %(weakL_temp)g\n' % vars()
+                    out_file.write( out_line )
+                    
+                    check_file2 = True
+
+
+    out_file.close()
+    out_file2.close()
+                        
+    #Temporary files are loaded and then grids are added using GMT
+    slab_xyzs = (weak_temp_xyz , sten_xyz)
+    
+    print(now(), 'so, at this stage, the grids should be saved : ')
+    
+    # merge data with background and make grids
+    slab_grids = []
+    grd_mins = ( temperature_min, stencil_min )
+    grd_maxs = ( temperature_mantle, stencil_max )
+    filters = ( filter_width, stencil_filter_width )
+    
+    #Andres - We need to convert the master_grid to .xyz to be able to add it to the weak subduction interface .xyz grid
+    masterGrid_xyz = master_grids[0].rstrip('grd') + 'xyz'
+    masterSten_xyz = master_grids[1].rstrip('grd') + 'xyz'
+    
+    grid_s = (masterGrid_xyz,masterSten_xyz)
+    
+    if(master_node_points is None):
+        for igrid in range(len(master_grids)):
+            rm_list.append( grid_s[igrid] )
+            cmd = master_grids[igrid] + ' -S'
+            
+            Core_GMT.callgmt( 'grd2xyz', cmd, '', '>', grid_s[igrid] )
+            master_node_points = []
+            
+            lon, lat, val = np.loadtxt( grid_s[igrid] , unpack=True )
+            for j in range(0, len(lon)):
+                currNodeRTP = [1, (90-lat[j])/180*math.pi, lon[j]/180*math.pi]
+                currNodeXYZ = Core_Util.spher2cart_coord(currNodeRTP[0], \
+                                                         currNodeRTP[1], \
+                                                         currNodeRTP[2])
+                master_node_points.append([lon[j], \
+                                           lat[j], \
+                                           currNodeRTP[2], \
+                                           currNodeRTP[1], \
+                                           currNodeXYZ[0], \
+                                           currNodeXYZ[1], \
+                                           currNodeXYZ[2]])
+                                           
+            out_file = open(grid_s[igrid], 'w')
+            
+            for i in range(0, len(master_node_points)):
+            #print(now(),'saving the master grid as xyz', master_node_points[i][0], master_node_points[i][1],grid_vals[igrid][i] )
+            
+                line = ('%lf %lf %lf\n')%(master_node_points[i][0], \
+                                          master_node_points[i][1], val[i])
+                out_file.write(line)
+            #end for
+            out_file.close()
+                                           
+    #print(now(),'the var and the sten are: ', val, sten)
+    if check_file1 == True and check_file2 == True:
+        #print(now(), 'before merging the grids - slab_xyz is equal to :', slab_xyzs)
+        
+        for nn, slab_xyz in enumerate( slab_xyzs ):
+        
+            #print(now(), 'before merging the grids (using cat) : the grids path are ',masterGrid_xyz,"XXXX", slab_xyz)
+            
+            cmd = 'cat ' + grid_s[nn] + ' >> ' + slab_xyz #Here both grids are merged
+            if verbose: print( now(), cmd )
+            subprocess.call( cmd, shell=True )
+
+            # make grid
+            grd_min = grd_mins[nn]
+            grd_max = grd_maxs[nn]
+            filter = filters[nn]
+            median_xyz = slab_xyz.rstrip('xyz') + 'median.xyz'
+            rm_list.append( median_xyz )
+            grid = slab_xyz.rstrip('xyz') + 'grd'
+            rm_list.append( grid )
+            slab_grids.append( grid )
+            ##################################################################################################################
+            ### Original way to create surface from .xyz grid
+#            cmd = slab_xyz + ' -I' + grd_res + ' -R' + R
+#            callgmt( 'blockmedian', cmd, '', '>', median_xyz )
+#            cmd = median_xyz + ' -I' + grd_res + ' -R' + R + ' -T' + tension \
+#                  + ' -Ll' + grd_min + ' -Lu' + grd_max
+#            callgmt( 'surface', cmd, '', '', '-G' + grid )
+            ##################################################################################################################
+            ### Andres - Improved way to create surface from .xyz grid (gmt neighboor prevents gaps in the weak subduction interface
+            # force pixel registration (this cannot be done using surface)
+            cmd = f"gmt nearneighbor {slab_xyz} -I{grd_res} -R{R} -S0.5d -N3/0 -G{grid}" #Use the pure grid, median blows it up
+            subprocess.run(cmd, shell=True, check=True)
+            ##################################################################################################################
+            args = '%(grid)s -T' % vars()
+            callgmt( 'grdsample', args, '', '', '-G%(grid)s' % vars() )
+
+            # filter grid
+            cmd = grid + ' -D2 -Fg' + filter + ' -R' + R
+            callgmt( 'grdfilter', cmd, '', '', '-G' + grid )
+
+            # clip grid
+            cmd = grid + ' -Sa%(grd_max)s/%(grd_max)s -Sb%(grd_min)s/%(grd_min)s' % vars()
+            callgmt( 'grdclip', cmd, '', '', '-G' + grid )
+    
+    #print(now(),"so here we created the weak interface grids inside the include fn === ",slab_grids)
+    
+    #print( now(), "end of test slab-grids : ")
+    #sys.exit(1)
+        
+        weakInterface_grids = tuple( slab_grids ) #Here, the weak interface and master_grid (lithosphere) have been already merged and cleaned/filtered
+    else:
+        weakInterface_grids = (None,None)
+    
+    # use constant age
+#    cmd = master_grid + ' ' + str(weakL_temp) + ' MUL' #So GMT needs data to be str()
+#    callgmt( 'grdmath', cmd, '', '=', master_grid )
+    
+    return weakInterface_grids
 
 #=====================================================================
 #=====================================================================
@@ -473,7 +838,7 @@ def build_temperature_for_all_znodes( master ):
 
         # lithosphere temperature (always include for slab assimilation)
         if control_d['BUILD_LITHOSPHERE'] or control_d['BUILD_SLAB']:
-            temp_grid, lith_grid = include_lithosphere( master, 
+            temp_grid, lith_grid = include_lithosphere( master,
                                          temp_grid, kk )
         else: lith_grid = None
 
@@ -493,6 +858,27 @@ def build_temperature_for_all_znodes( master ):
             temp_grid, sten_grid, master_node_points = include_silo( master, master_grids, \
                                                               master_node_points, \
                                                               kk )
+                                                              
+        if control_d['BUILD_WEAK_INTERFACE']:
+            #print(now(), "Weak interface is being computed")
+            
+            #temp_grid_info = (temp_grid ,sten_grid)
+            # We only need to replace the master grids by these new created grids
+            #temp_grid = include_weak_interface(master,temp_grid, kk)
+            ################################################################################################################################
+            ######## OPTION 1 - Using cat to merge grids and the override the master_grid
+            weak_interfaces =  include_weak_interface(master,master_grids, master_node_points,kk)
+            #print(weak_interfaces)
+            #sys.exit(1)
+            #print( now(), "the file type is : ",type(weak_interfaces),type(weak_interfaces[0]),type(master_grids[0]) )
+            #print( now(), "lets trace shape of weak_interface grids : ", weak_interfaces[0],weak_interfaces[1])
+            if weak_interfaces[0] is not None and weak_interfaces[1] is not None:
+                for nn, weak_interface in enumerate( weak_interfaces ):
+                    #print( now(), "the file type slab is : ", len(slab_grids),nn,type(slab_grid),type(master_grids[nn]) )
+                    #print( now(), "the file type is : ", len(weak_interfaces),nn,type(weak_interface),master_grids[nn] )
+                    cmd = 'cp ' + weak_interface + ' ' + master_grids[nn]
+                    if verbose: print( now(), cmd )
+                    subprocess.call( cmd, shell=True )
 
         # adiabat
         if control_d['BUILD_ADIABAT']:
@@ -581,7 +967,7 @@ def check_input_parameters( master_d ):
         control_d['grid_dir'] = control_d['grid_dir'].split('/')[-1]
 
     # global or regional model
-    if DATA: 
+    if DATA:
         # check entries from the geodynamics framework (age grids, subduction xy)
         control_d['age1_file']  =  geoframe_d['age_grid_no_mask_dir'] + '/'
         control_d['age1_file'] += geoframe_d['age_grid_no_mask_prefix'] + '%(age)s.grd' % vars()
@@ -617,7 +1003,7 @@ def check_input_parameters( master_d ):
             if region != 360:
                 print('Grid not in 0-360 format, reformatting now')
                 cmd = '%(file)s -Rg -S' % vars()
-                callgmt( 'grdedit', cmd ) 
+                callgmt( 'grdedit', cmd )
                 
         # ensure that these files exist
         for ifile in [ control_d['age1_file'], control_d['age2_file'], control_d['sub_file'] ]:
@@ -670,7 +1056,7 @@ def check_input_parameters( master_d ):
         nodey = pid_d['mgunity'] * int(math.pow(2,pid_d['levels']-1)) * pid_d['nprocy'] + 1
         nodez = pid_d['mgunitz'] * int(math.pow(2,pid_d['levels']-1)) * pid_d['nprocz'] + 1
         if nodex != pid_d['nodex'] or nodey != pid_d['nodey'] or nodez != pid_d['nodez']:
-            logging.error('The equations ') 
+            logging.error('The equations ')
             logging.error('nodex = 1 + nprocx + mgunitx + 2**(levels-1)')
             logging.error('nodey = 1 + nprocy + mgunity + 2**(levels-1)')
             logging.error('nodez = 1 + nprocz + mgunitz + 2**(levels-1)')
@@ -877,7 +1263,7 @@ def no_assimilation_regions( master_d, age_grid, grd_res ):
     grid_dir = control_d['grid_dir']
     no_ass_dir = geoframe_d['no_ass_dir']
     no_ass_file = no_ass_dir + \
-        '/topology_network_polygons_%(age)s.00Ma.xy' % vars() 
+        '/topology_network_polygons_%(age)s.00Ma.xy' % vars()
     padding = control_d['no_ass_padding']
     R = 'g' # by default for all age grid processing
     rm_list = func_d['rm_list']
@@ -905,7 +1291,7 @@ def no_assimilation_regions( master_d, age_grid, grd_res ):
         callgmt( 'grdmask', cmd, '', '', '-G' + no_ass_mask1 )
         callgmt( 'grdedit', no_ass_mask1 + ' -S -R%(R)s' % vars())
 
-        if padding: 
+        if padding:
             # extra padding around edge of polygon
             no_ass_mask2 = grid_dir + '/no_ass_mask2.grd'
             rm_list.append( no_ass_mask2 )
@@ -1239,8 +1625,8 @@ def include_blob( master, master_grids, master_node_points, kk ):
         blob_center_depth = [float(i) for i in blob_center_depth]
         blob_radius = [float(i) for i in blob_radius]
         blob_birth_age = [float(i) for i in blob_birth_age]
-        blob_dT = [float(i) for i in blob_dT]        
-        blob_profile = [str(i) for i in blob_profile]        
+        blob_dT = [float(i) for i in blob_dT]
+        blob_profile = [str(i) for i in blob_profile]
     #end if
 
     # check if birth ages fall within age-range and issue error message otherwise.
@@ -1277,7 +1663,7 @@ def include_blob( master, master_grids, master_node_points, kk ):
                                        currNodeXYZ[1], \
                                        currNodeXYZ[2]])
             #end if
-        #end for        
+        #end for
     #end if
     
     # blob_profile_functions
@@ -1305,14 +1691,14 @@ def include_blob( master, master_grids, master_node_points, kk ):
     for i in range(0, len(blob_center_lon)):
 
         # skip blob if birth age != curr_age
-        if(blob_birth_age[i] != curr_age): 
+        if(blob_birth_age[i] != curr_age):
             #print ('skipping blob at %f' % (blob_birth_age[i]))
             continue
         #end if
 
         blobCenterRTP = [(R-blob_center_depth[i]*1e3)/R, \
                          blob_center_lat[i]/180*math.pi, \
-                         blob_center_lon[i]/180*math.pi] 
+                         blob_center_lon[i]/180*math.pi]
         blobCenterXYZ = Core_Util.spher2cart_coord(blobCenterRTP[0], \
                                                    blobCenterRTP[1], \
                                                    blobCenterRTP[2])
@@ -1327,7 +1713,7 @@ def include_blob( master, master_grids, master_node_points, kk ):
             if(math.fabs(blobCenterRTP[1] - master_node_points[j][3]) \
                 > angleSubtendedByBase):
                 if(math.fabs(blobCenterRTP[2] - master_node_points[j][2]) \
-                    > angleSubtendedByBase): 
+                    > angleSubtendedByBase):
                     continue
                 #end if
             #end if
@@ -1430,8 +1816,8 @@ def include_silo( master, master_grids, master_node_points, kk ):
         silo_radius = [float(i) for i in silo_radius]
         silo_cylinder_height = [float(i) for i in silo_cylinder_height]
         silo_birth_age = [float(i) for i in silo_birth_age]
-        silo_dT = [float(i) for i in silo_dT]        
-        silo_profile = [str(i) for i in silo_profile]        
+        silo_dT = [float(i) for i in silo_dT]
+        silo_profile = [str(i) for i in silo_profile]
     #end if
     
     # check if birth ages fall within age-range and issue error message otherwise.
@@ -1472,7 +1858,7 @@ def include_silo( master, master_grids, master_node_points, kk ):
                                        currNodeXYZ[1], \
                                        currNodeXYZ[2]])
             #end if
-        #end for        
+        #end for
     #end if
     
     # silo_profile_functions
@@ -1508,7 +1894,7 @@ def include_silo( master, master_grids, master_node_points, kk ):
 
         siloBaseCenterRTP = [(R-silo_base_center_depth[i]*1e3)/R, \
                          silo_base_center_lat[i]/180*math.pi, \
-                         silo_base_center_lon[i]/180*math.pi] 
+                         silo_base_center_lon[i]/180*math.pi]
         siloBaseCenterXYZ = Core_Util.spher2cart_coord(siloBaseCenterRTP[0], \
                                                    siloBaseCenterRTP[1], \
                                                    siloBaseCenterRTP[2])
@@ -1533,7 +1919,7 @@ def include_silo( master, master_grids, master_node_points, kk ):
             if(math.fabs(siloBaseCenterRTP[1] - master_node_points[j][3]) \
                 > angleSubtendedByBase):
                 if(math.fabs(siloBaseCenterRTP[2] - master_node_points[j][2]) \
-                    > angleSubtendedByBase): 
+                    > angleSubtendedByBase):
                     continue
                 #end if
             #end if
@@ -1647,7 +2033,7 @@ def make_tracer_summary_postscript( master_d ):
     callgmt( 'gmtset', 'LABEL_OFFSET', '', '', '0.02' )
     callgmt( 'gmtset', 'ANNOT_FONT_SIZE_PRIMARY', '', '', '10p' )
     callgmt( 'gmtset', 'ANNOT_FONT_PRIMARY', '', '', '4' )
-    gmt_base_options = Core_GMT.start_postscript( ps ) 
+    gmt_base_options = Core_GMT.start_postscript( ps )
     additional_options = {key: control_d[key] for key in control_d if
         key=='J' or key=='R'}
     gmt_base_options.update( additional_options )
@@ -1698,7 +2084,7 @@ def make_summary_postscript( master, master_grids, kk,
 
     '''Create a summary postscript for this depth.'''
 
-    logging.info('start make_summary_postscript') 
+    logging.info('start make_summary_postscript')
 
     coor_d = master['coor_d']
     control_d = master['control_d']
@@ -1768,9 +2154,9 @@ def make_summary_postscript( master, master_grids, kk,
         G = 'darkgrey'
         S = 'V0.015i/0.06i/0.05i'
         X = 'a0.5'
-        Y = 'a8' 
+        Y = 'a8'
         cmd = '%(filename)s -G%(G)s -S%(S)s -X%(X)s -Y%(Y)s' % vars()
-        callgmt( 'psxy', cmd, gmt_base_options, '>>', ps ) 
+        callgmt( 'psxy', cmd, gmt_base_options, '>>', ps )
 
         # velocity scale bar
         velocity_scale = control_d['velocity_scale'] / 4
@@ -1793,7 +2179,7 @@ S 0.125 v 0.25/0.015/0.06/0.05 0/0/0 1,black 0.27i %(velocity_scale).0f cm/yr\nE
     if sub_file_right:
         cmd = sub_file_right + ' -Sf0.2i/0.05irt -G%(G)s -W%(W)s -m \
 -Xa0.5 -Ya8' % vars()
-        callgmt( 'psxy', cmd, gmt_base_options, '>>', ps ) 
+        callgmt( 'psxy', cmd, gmt_base_options, '>>', ps )
 
     if age_grid:
         if SYNTHETIC:
@@ -1902,7 +2288,7 @@ def output_history( master ):
     out_data = ( temp_by_cap, sten_by_cap )
 
     make_dir( hist_dir )
-    Core_Citcom.write_cap_or_proc_list_to_files( pid_d, outname, 
+    Core_Citcom.write_cap_or_proc_list_to_files( pid_d, outname,
                                               out_data, 'cap', False )
 
     if IC:
@@ -2190,11 +2576,11 @@ def output_lith_age( master_d ):
         out_name += '.#' # cap number suffix
         out_name2 += '.#'
 
-    Core_Citcom.write_cap_or_proc_list_to_files( pid_d, 
+    Core_Citcom.write_cap_or_proc_list_to_files( pid_d,
                                out_name, (age_by_cap,), 'cap', False )
 
     if IC:
-        Core_Citcom.write_cap_or_proc_list_to_files( pid_d, 
+        Core_Citcom.write_cap_or_proc_list_to_files( pid_d,
                               out_name2, (age_by_cap,), 'cap', False )
 
 #=====================================================================
@@ -2288,14 +2674,14 @@ def output_ivel( master ):
                                       func_d['ivel_stencil_by_cap'], 0, 3 )
         # must not impose ivels at boundary (stencil of 2 is ignored by
         # CitcomS with data assimilation)
-        Core_Citcom.conform_regional_sides( pid_d, 
+        Core_Citcom.conform_regional_sides( pid_d,
                                       func_d['ivel_stencil_by_cap'], 2, 1 )
     elif FULL_SPHERE:
         # placeholder
         outname += '.#' # cap number suffix
         outname2 += '.#' # for IC only
 
-    Core_Citcom.conform_top_and_bottom_surfaces( pid_d, 
+    Core_Citcom.conform_top_and_bottom_surfaces( pid_d,
                                    func_d['ivel_stencil_by_cap'], 2, 2 )
 
     # number of imposed velocity nodes (duplicates shared nodes for global case)
@@ -2308,7 +2694,7 @@ def output_ivel( master ):
     ivel_data = (func_d['ivel_velocity_by_cap'], func_d['ivel_stencil_by_cap'])
 
     make_dir( ivel_dir )
-    Core_Citcom.write_cap_or_proc_list_to_files( pid_d, outname, 
+    Core_Citcom.write_cap_or_proc_list_to_files( pid_d, outname,
                                              ivel_data, 'cap', False )
 
     # create previous age for IC (required by CitcomS)
@@ -2333,14 +2719,14 @@ def preprocess_gplates_line_data( master, gplates_xy_filename ):
     out_name = gplates_xy_filename.split('/')[-1].rstrip('xy')
     out_name += 'g.xy' # g for GMT global [0,360]
     rm_list.append( out_name )
-    in_name = Core_Util.convert_coordinates( gplates_xy_filename, 
+    in_name = Core_Util.convert_coordinates( gplates_xy_filename,
         'lon', 'lat', out_name, 'lon', 'lat', 'g' )
 
     # increase resolution of line data
     out_name = out_name.rstrip('xy') + str(res) + '.xy'
     rm_list.append( out_name )
     # save this out
-    out_name1 = Core_Util.increase_resolution_of_xy_line( in_name, res, 
+    out_name1 = Core_Util.increase_resolution_of_xy_line( in_name, res,
         out_name, True )
     
     return out_name1
@@ -2492,7 +2878,7 @@ def make_ivel_stencil_by_cap( master ):
     rm_list.append( out_filename )
 
     # need to reverse depth_km for bisect to work correctly
-    # determine coarsest multigrid mesh for z nodes    
+    # determine coarsest multigrid mesh for z nodes
     coarse_rdepth_km = list( reversed( depth_km ) )[::2**(levels-1)]
 
     # master KDTree with (duplicated) shared nodes at the edges of caps
@@ -2574,13 +2960,13 @@ def make_ivel_stencil_by_cap( master ):
                 if rad < 0.96076: # i.e. 250 km
                     znode_list.append( znode )
                     # dist to center line
-                    dist = Core_Util.get_slab_center_dist( 
+                    dist = Core_Util.get_slab_center_dist(
                         depth_km[znode], start_depth, slab_dip, roc,
                         vertical_slab_depth )
                     dist_list.append( dist )
                     radius_list.append( rad )
 
-            # XXX ensure that ivels are only applied when both 252 
+            # XXX ensure that ivels are only applied when both 252
             # and 336 km are available
             if SYNTHETIC and len(znode_list) < 2: znode_list = []
 
@@ -2597,7 +2983,7 @@ def make_ivel_stencil_by_cap( master ):
                     map.append( tuple(entry) )
 
             # to store coordinate data for this line segment
-            data_list = [] 
+            data_list = []
 
         # coordinate line
         else:
@@ -2660,8 +3046,8 @@ def make_ivel_stencil_by_cap( master ):
                 # ------------------- velocities --------------------
                 # ---------------------------------------------------
 
-                # need to find a point on subducting lithosphere that 
-                # is outside of the velocity smoothing region for 
+                # need to find a point on subducting lithosphere that
+                # is outside of the velocity smoothing region for
                 # regional models, otherwise the extracted values are
                 # less than the actual plate motion velcity.
                 if SYNTHETIC:
@@ -2673,9 +3059,9 @@ def make_ivel_stencil_by_cap( master ):
 
                 components = [] # store v_theta, v_phi, v_radius
                 for grid in velocity_grids:
-                    Core_Util.find_value_on_line( in_filename, grid, 
+                    Core_Util.find_value_on_line( in_filename, grid,
                                                         out_filename )
-                    data = np.loadtxt( out_filename )[2] 
+                    data = np.loadtxt( out_filename )[2]
                     components.append( data )
                 components.append( 0 ) # vr always zero
                 vtpr = np.array( components )
@@ -2796,7 +3182,7 @@ def make_ivel_stencil_by_cap( master ):
     # close debug file
     if DEBUG: debug_file.close()
 
-    # runtime of this function 
+    # runtime of this function
     t1 = time.time() # end time
     timefmt = str(datetime.timedelta(seconds=t1-t0))
     print( now(), 'make_ivel_stencil_by_cap: runtime', timefmt )
@@ -3012,7 +3398,7 @@ def make_synthetic_surface_velocity_grids( master ):
     # errors of the sort:
     #     lon = velo_data[0][:,0]
     #     IndexError: too many indices
-    # because no data is found in the grdtrack, no data is input into 
+    # because no data is found in the grdtrack, no data is input into
     # the velo_data array.  This can probably be cleaned up at some point.
     velocity_mesh = 'velocity_map_mesh.xy'
     rm_list.append( velocity_mesh )
@@ -3073,7 +3459,7 @@ def make_synthetic_subduction_file( master ):
 
     slab_filename = 'synthetic_subduction_boundaries_%(age)0.2fMa.g.head.10.xy' % vars()
     rm_list.append( slab_filename )
-    slab_file = open( slab_filename, 'w' ) 
+    slab_file = open( slab_filename, 'w' )
 
     # TESTING: make two subduction zones
     lon_trench_list = [ lon_trench ] #, 22.5]
@@ -3153,8 +3539,8 @@ def make_synthetic_masks( master_d ):
     # XXX only works for sR
     mask_file = open( mask_xy, 'a' )
     # third and fourth columns contain dummy values
-    lat_max1 = lat_max + 0.25 
-    lat_min1 = lat_min - 0.25 
+    lat_max1 = lat_max + 0.25
+    lat_min1 = lat_min - 0.25
     # XXX comment out next two lines for testing with circular
     # subduction zone
     mask_file.write( '0 %(lat_max1)s 0 0\n' % vars() )
@@ -3222,7 +3608,7 @@ def set_verbose( control_d ):
     '''Set verbose for this script and all Core modules that
        are imported.'''
 
-    verbose_list = [Core_Citcom.verbose, 
+    verbose_list = [Core_Citcom.verbose,
                     Core_GMT.verbose, Core_Util.verbose, verbose]
 
     if control_d['VERBOSE']: val = True
@@ -3251,7 +3637,7 @@ def write_coordinates_by_cap( master ):
     nproc_surf = pid_d['nproc_surf']
     OUTPUT_IVEL = control_d['OUTPUT_IVEL']
 
-    coor_by_cap =  Core_Citcom.read_citcom_surface_coor( pid_d, 
+    coor_by_cap =  Core_Citcom.read_citcom_surface_coor( pid_d,
                                                           coord_file )
     outname = 'coord.cap.#'
     coor_cap_names = Core_Citcom.write_cap_or_proc_list_to_files( pid_d,
@@ -3327,3 +3713,5 @@ if __name__ == "__main__":
 #=====================================================================
 #=====================================================================
 #=====================================================================
+
+
