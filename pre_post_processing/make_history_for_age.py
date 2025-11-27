@@ -104,6 +104,11 @@ def main():
         if control_d['FLAT_SLAB']:
             control_d['flat_slab_leading_file'] = preprocess_gplates_line_data( master_d,
                 control_d['flat_slab_leading_file'] )
+#                
+#        print(control_d['MAX_ASSIMILATION_DEPTH'],control_d['MAX_DEPTH_WEAK_INTERFACE'])
+#        print(control_d['WEAK_INTERFACE_TEMP_CAP'])
+#
+#        sys.exit(1)
             
         # afile_1 is basically always required.  Even if not building
         # slabs it is used as the GMT grid to construct uniform
@@ -372,11 +377,12 @@ def build_slab_temperature( master, kk, mantle_xyzs ):
             cmd = 'cat ' + flat_xyzs[nn] + ' >> ' + slab_xyz
             if verbose: print( now(), cmd )
             subprocess.call( cmd, shell=True )
-
+    
+    weak_interface_temperature = str(float(temperature_mantle) + float(temperature_mantle)/3)
     # merge data with background and make grids
     slab_grids = []
     grd_mins = ( temperature_min, stencil_min )
-    grd_maxs = ( temperature_mantle, stencil_max )
+    grd_maxs = ( weak_interface_temperature, stencil_max )
     filters = ( filter_width, stencil_filter_width )
     for nn, slab_xyz in enumerate( slab_xyzs ):
         cmd = 'cat ' + mantle_xyzs[nn] + ' >> ' + slab_xyz
@@ -432,11 +438,9 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
     scalet = pid_d['scalet']
     rm_list = func_d['rm_list']
     suffix = control_d['suffix']
-    
     ####################################################################################################
     #################### From the make_slab_temperature_xyz fn - Andres weak interface
     UM_depth = control_d['UM_depth']
-
     gmt_char = control_d['gmt_char']
     lith_age_min = control_d['lith_age_min']
     oceanic_lith_age_max = control_d['oceanic_lith_age_max']
@@ -461,10 +465,6 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
     R = 'g'
     ####################################################################################################
     spacing_bkg_pts = control_d['spacing_bkg_pts']
-
-    #stencil_max = control_d['stencil_max']
-    #stencil_min = control_d['stencil_min']
-    #stencil_filter_width = control_d['stencil_filter_width']
     stencil_filter_width = str(control_d['stencil_filter_width'])
     filter_width = str(control_d['filter_width'])
     stencil_max = str(control_d['stencil_max'])
@@ -472,11 +472,6 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
     temperature_mantle = str(control_d['temperature_mantle'])
     temperature_min = str(control_d['temperature_min'])
     tension = str(control_d['tension'])
-    
-#    print( now(), 'The stencil parameters are: {0} {1} {2} {3}'.format(str(stencil_filter_width), #110.0 55.0 1.0 0.0
-#                                                                str(filter_width),
-#                                                                str(stencil_max),
-#                                                                str(stencil_min)))
     
     depth_km = coor_d['depth_km'][kk]
     
@@ -488,8 +483,9 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
     # do nothing and exit
     print( now(), 'The lithosphere depth here, apparently, is:  ',control_d['lith_depth_gen'])
     
-    #if depth_km > control_d['lith_depth_gen']: return (None,None)
-    if depth_km > 16: return (None,None) #Andres- Dont use this approach below 16 km, since its managed by the continental grids post-processing script
+    #if depth_km > control_d['lith_depth_gen']: return (None,None) #Andres- does it detect the lithospheric thickness of the OP? #It goes up to 293 km depth
+    if depth_km > float(control_d['MAX_DEPTH_WEAK_INTERFACE']): return (None,None)
+    
     # else include lithosphere
     depth = coor_d['depth'][kk]
     
@@ -509,31 +505,14 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
     startval = -0.5*((N_slab_pts-1)*spacing_slab_pts)
     d_p_degrees = [startval+ii*spacing_slab_pts for ii in range(N_slab_pts)]
     
-    d_p_degrees = [val for val in d_p_degrees if val >= 0] #Just take half of the distances - option 1
-    #d_p_degrees = [val+abs(startval) for val in d_p_degrees if val >= 0] #Just take half of the distances - option 2
-    
-    #d_p_degrees = [val for val in d_p_degrees if val <= 4] # remove values between 3 and 3.75. Narrow channel - TOO THIN -6 is too thick
-    
-    d_p_degrees = [val for val in d_p_degrees if val <= 5] # remove values between 3 and 3.75. Narrow channel
-    
+    d_p_degrees = [val for val in d_p_degrees if val >= 0] #Just take half of the distances
+    #d_p_degrees = np.array(d_p_degrees) + (3.75*0.1) #move the weak interface a 10% of the max horizontal distance to the OP to protect slab structure
+    d_p_degrees = np.array(d_p_degrees) + (3.75*0.25) #move the weak interface a 25% of the max horizontal distance to the OP to protect slab structure
     d_p = [abs(ii*(110.0/radius_km)) for ii in d_p_degrees] # non-dim
     ####################################################################################################
     #### FIXED age for the weak subduction interface region -
     fix_age = 1 #Ma
     ####################################################################################################
-#    print(now(), 'These are the values of all variables : ')
-#    print(now(),slab_age_xyz,age,grid_dir,scalet,UM_depth,gmt_char,gmt_char,lith_age_min,
-#     oceanic_lith_age_max,myr2sec,N_slab_pts,radius_km,roc,scalet,spacing_slab_pts,
-#     thermdiff,vertical_slab_depth,grd_res,spacing_bkg_pts,stencil_depth_min,stencil_width,
-#     stencil_width_smooth,stencil_filter_width,filter_width,stencil_max,stencil_min,
-#     temperature_mantle,temperature_min,tension,depth_km  )
-     
-    #sys.exit(1)
-    #print(now(), 'These are the values of all variables : ')
-    #print(now(),slab_age_xyz)
-    
-    #sys.exit(1)
-    
     
     for line in open( slab_age_xyz ):
         # header line
@@ -609,53 +588,34 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
                 dist2 = (dist + advection*d_p_degrees[ii]) #+ (dist*scale_dist)    #Andres - Weak subduction interface
                 nlon, nlat = Core_Util.get_point_normal_to_subduction_zone(
                                  plon, plat, dx, dy, dist2, polarity )
-                                 
-                #We have both the polarity and the location of the boundary in the overriding plate (displaced perpendicular to trenches)
 
-                # stencil of weak interface in the Overriding plate -
+                # stencil of weak interface in the Overriding plate - This smooths the temperature field so prevent huge lateral viscosity contrasts that might affect the CitComS solver.
                 #if depth_km >= start_depth and depth_km <= max_stencil_depth:
                 if depth_km <= lithos_depth:
-
                     # horizontal (lateral) direction
                     smooth = stencil_width_smooth/6371
                     twidth = stencil_width/2/6371
                     arg = ( d_p[ii]-twidth ) / smooth
                     sten_val = 0.5 * (1-np.tanh(arg))
-
                     # vertical (depth) direction
                     smooth = sten_smooth / radius_km
                     tdepth = sten_depth / radius_km
                     arg = ( depth-tdepth ) / smooth
                     sten_val *= 0.5 * (1-np.tanh(arg))
-                    
-                    #I think this file has to be written anyway..?? - These files will die after GMT computations are done
+                    #The file below will be deleted after GMT computations are done
                     out_line = '%(nlon)g %(nlat)g %(sten_val)g\n' % vars()
                     out_file2.write( out_line )
                     
                     check_file1 = True
-
-
+                    
                 # temperature
                 #if depth_km >= start_depth and depth_km <= slab_depth:
                 if depth_km <= lithos_depth: #The channel only is relevant between 0-100 km depth (+25 km to capture the thermal boundary layer)
-                    ## ERFC calculation of the lithosphere thermal structure - Following the radious of curvature
-                    #print(now(), 'Checking computation of weakL-temperature grid :', type(temperature_mantle),type(dT),type(dd),type(d_p[ii]))
-                    weakL_temp = float(temperature_mantle) - dT * Core_Util.erfc( dd*d_p[ii] )
-                    
-                    #print( now(), 'The calculate weak temperature interface is: ',  str(weakL_temp)," at depth ",str(depth_km))
-                    #if depth_km <= 125.0:
-                    # Perpendicular distance from slab centre in km (~110 km per degree)
-                    #print( now(), 'Here we are weakening the subduction channel at depth = \n',str(depth_km) )
-                    # prevent overprinting of pre-existing slabs
-                    t_mantle= float(temperature_mantle)
-                    frac = (weakL_temp - t_mantle)
-                    frac /= t_mantle
-                    frac *= 100 # to percentage
-                    #if frac >= 2: # Override the weak layer if its thermal structure cools too much
-                    #print( now(), 'Here we are overriding the the subduction channel and the temperature and fraction is %: ',frac)
-                    out_line = '%(nlon)g %(nlat)g %(weakL_temp)g\n' % vars()
+                    ## Half-space calculation of the lithosphere thermal structure (using erfc function) - Following the radious of curvature
+                    weakL_temp = float(temperature_mantle) + dT * Core_Util.erfc( dd*d_p[ii] )
+                    weakL_temp = weakL_temp * 5 # This makes sure than the thermal anomaly of the weak interface reaches the maximum value allowed by the weak_interface_temperature cap (Tmantle + Tmantle/3)
+                    out_line = '%(nlon)g %(nlat)g %(weakL_temp)g\n' % vars() #output (temporal) grid with the weak subduction interface temperature anomaly
                     out_file.write( out_line )
-                    
                     check_file2 = True
 
 
@@ -665,12 +625,15 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
     #Temporary files are loaded and then grids are added using GMT
     slab_xyzs = (weak_temp_xyz , sten_xyz)
     
-    print(now(), 'so, at this stage, the grids should be saved : ')
+    Weak_interface_cap = control_d['WEAK_INTERFACE_TEMP_CAP'] # Temperature of mantle is divided by the factor = WEAK_INTERFACE_TEMP_CAP
+    
+    print(now(), 'Below, the Weak subduction interface grids are be saved : ')
+    weak_interface_temperature = str(float(temperature_mantle) + float(temperature_mantle)/float(Weak_interface_cap)) # This caps the thermal anomaly of the weak subduction interface
     
     # merge data with background and make grids
     slab_grids = []
     grd_mins = ( temperature_min, stencil_min )
-    grd_maxs = ( temperature_mantle, stencil_max )
+    grd_maxs = ( weak_interface_temperature, stencil_max )
     filters = ( filter_width, stencil_filter_width )
     
     #Andres - We need to convert the master_grid to .xyz to be able to add it to the weak subduction interface .xyz grid
@@ -717,9 +680,6 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
         #print(now(), 'before merging the grids - slab_xyz is equal to :', slab_xyzs)
         
         for nn, slab_xyz in enumerate( slab_xyzs ):
-        
-            #print(now(), 'before merging the grids (using cat) : the grids path are ',masterGrid_xyz,"XXXX", slab_xyz)
-            
             cmd = 'cat ' + grid_s[nn] + ' >> ' + slab_xyz #Here both grids are merged
             if verbose: print( now(), cmd )
             subprocess.call( cmd, shell=True )
@@ -734,7 +694,7 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
             rm_list.append( grid )
             slab_grids.append( grid )
             ##################################################################################################################
-            ### Original way to create surface from .xyz grid
+            ### Original way to create surface from .xyz grid - Using block median resulted in a very noisy grid.
 #            cmd = slab_xyz + ' -I' + grd_res + ' -R' + R
 #            callgmt( 'blockmedian', cmd, '', '>', median_xyz )
 #            cmd = median_xyz + ' -I' + grd_res + ' -R' + R + ' -T' + tension \
@@ -749,26 +709,17 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
             args = '%(grid)s -T' % vars()
             callgmt( 'grdsample', args, '', '', '-G%(grid)s' % vars() )
 
-            # filter grid
-            cmd = grid + ' -D2 -Fg' + filter + ' -R' + R
-            callgmt( 'grdfilter', cmd, '', '', '-G' + grid )
+            # filter grid - Do we need this?
+#            cmd = grid + ' -D2 -Fg' + filter + ' -R' + R
+#            callgmt( 'grdfilter', cmd, '', '', '-G' + grid )
 
             # clip grid
             cmd = grid + ' -Sa%(grd_max)s/%(grd_max)s -Sb%(grd_min)s/%(grd_min)s' % vars()
             callgmt( 'grdclip', cmd, '', '', '-G' + grid )
     
-    #print(now(),"so here we created the weak interface grids inside the include fn === ",slab_grids)
-    
-    #print( now(), "end of test slab-grids : ")
-    #sys.exit(1)
-        
         weakInterface_grids = tuple( slab_grids ) #Here, the weak interface and master_grid (lithosphere) have been already merged and cleaned/filtered
     else:
         weakInterface_grids = (None,None)
-    
-    # use constant age
-#    cmd = master_grid + ' ' + str(weakL_temp) + ' MUL' #So GMT needs data to be str()
-#    callgmt( 'grdmath', cmd, '', '=', master_grid )
     
     return weakInterface_grids
 
@@ -860,13 +811,8 @@ def build_temperature_for_all_znodes( master ):
                                                               kk )
                                                               
         if control_d['BUILD_WEAK_INTERFACE']:
-            #print(now(), "Weak interface is being computed")
-            
-            #temp_grid_info = (temp_grid ,sten_grid)
-            # We only need to replace the master grids by these new created grids
-            #temp_grid = include_weak_interface(master,temp_grid, kk)
+            print(now(), "Weak interface is being computed")
             ################################################################################################################################
-            ######## OPTION 1 - Using cat to merge grids and the override the master_grid
             weak_interfaces =  include_weak_interface(master,master_grids, master_node_points,kk)
             #print(weak_interfaces)
             #sys.exit(1)
