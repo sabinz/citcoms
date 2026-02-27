@@ -1766,8 +1766,8 @@ def make_slab_temperature_xyz( master, kk ):
     d_p_degrees = np.array([startval+ii*spacing_slab_pts for ii in range(N_slab_pts)])
     d_p = [abs(ii*(110.0/radius_km)) for ii in d_p_degrees] # non-dim
 
-    if verbose: print( now(), 'd_p_degrees', d_p_degrees )
-    if verbose: print( now(), 'd_p', d_p )
+#    if verbose: print( now(), 'd_p_degrees', d_p_degrees )
+#    if verbose: print( now(), 'd_p', d_p )
 
     for line in open( slab_age_xyz ):
         # header line
@@ -1804,7 +1804,7 @@ def make_slab_temperature_xyz( master, kk ):
             # temperature_mantle-temperature_min is temperature drop
             
             #dT = (temperature_mantle-temperature_min) / (2*np.sin( slab_dip )) - It results in slab break-off after re-start - Original before weak subduction interface
-            dT = float(control_d['SLAB_STRENGHT_FACTOR']) * (temperature_mantle-temperature_min) / (2*np.sin( slab_dip )) #Andres - Make that slab colder - Works very good to prevent slab break-off
+            dT = float(control_d['SLAB_STRENGTH_FACTOR']) * (temperature_mantle-temperature_min) / (2*np.sin( slab_dip )) #Andres - Make that slab colder - Works very good to prevent slab break-off
 
             sten_depth, sten_smooth = \
                 get_stencil_depth_and_smooth( control_d, slab_depth )

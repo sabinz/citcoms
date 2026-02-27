@@ -9,7 +9,7 @@
 #                    Dan J. Bower, Michael Gurnis
 #          (c) California Institute of Technology 2015
 #                        ALL RIGHTS RESERVED
-# 
+#
 #
 #=====================================================================
 #
@@ -378,7 +378,8 @@ def build_slab_temperature( master, kk, mantle_xyzs ):
             if verbose: print( now(), cmd )
             subprocess.call( cmd, shell=True )
     
-    weak_interface_temperature = str(float(temperature_mantle) + float(temperature_mantle)/3)
+    Weak_interface_cap = control_d['WEAK_INTERFACE_TEMP_CAP'] # Temperature of mantle is divided by the factor = WEAK_INTERFACE_TEMP_CAP
+    weak_interface_temperature = str(float(temperature_mantle) + float(temperature_mantle)/float(Weak_interface_cap))
     # merge data with background and make grids
     slab_grids = []
     grd_mins = ( temperature_min, stencil_min )
