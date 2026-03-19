@@ -115,19 +115,79 @@ def main():
     depth_list = coor_d['depth_km']
     nodez      = pid_d['nodez']
     nproc_surf = pid_d['nproc_surf']
+    
+    #Restart free convection workflow - Andres
+    try:
+        Free_convection_flag = pid_d['FREECONV']
+    except Exception as e:
+        Free_convection_flag = 0
 
     # Check how to read and parse the time spec:
     read_time_d = True
     #read_time_d = False
     
-    # Compute the timesteps to process
-    if read_time_d : 
-        time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'], master_d['time_d'])
+    # Compute the timesteps to process - Andres
+    if int(Free_convection_flag) == 1:
+        print("Using Re-started free convection worklow ")
+        step = int(pid_d['time_step'])
+        age  = float(pid_d['time_spec'])
         
-    else :
-        time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'])
-    print ( now(), 'grid_maker.py: time_spec_d = ')
-    Core_Util.tree_print( time_spec_d )
+        step_l = []
+        age_l = []
+
+        
+        step_l.append(step)
+        age_l.append(age)
+        
+        if not step_l:
+            raise ValueError(f"read_step_age_existing_file: no valid rows in {step_age_existing_path}")
+
+        # Sort by timestep
+        pairs = sorted(zip(step_l, age_l), key=lambda x: x[0])
+        step_l = [p[0] for p in pairs]
+        age_l  = [p[1] for p in pairs]
+
+        # Oldest age defines runtime zero point
+        oldest_age = max(age_l)
+
+        runtime_l = []
+        triple_l = []
+        for step, age in zip(step_l, age_l):
+            runtime = oldest_age - age
+            runtime_l.append(runtime)
+            triple_l.append((int(step), float(age), float(runtime)))
+
+        d = {
+            'age_Ma': age_l,
+            'step': step_l,
+            'runtime_Myr': runtime_l,
+            'triples': triple_l
+        }
+        
+        #Override the time dictionary
+        master_d['time_d'] = d
+        
+        #DO Everything as the else condition
+        if read_time_d :
+            time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'], master_d['time_d'])
+            
+        else :
+            time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'])
+        print ( now(), 'grid_maker.py: time_spec_d = ')
+        Core_Util.tree_print( time_spec_d )
+
+        if verbose:
+            print(Core_Util.now(), 'Bulding time spec for free convection re-starts workflow: built time_d with', len(triple_l), 'rows')
+        
+    else:
+        # Do the original instructions
+        if read_time_d :
+            time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'], master_d['time_d'])
+            
+        else :
+            time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'])
+        print ( now(), 'grid_maker.py: time_spec_d = ')
+        Core_Util.tree_print( time_spec_d )
 
     # levels to process 
     level_spec_d = Core_Util.get_spec_dictionary( control_d['level_spec'] )
@@ -182,62 +242,82 @@ def main():
     print(now(), '=========================================================================')
     print(now(), 'grid_maker.py: Main looping, first over times, then sections, then levels')
     print(now(), '=========================================================================')
+    
+    if int(Free_convection_flag) == 0:
+        # Loop over times
+        for tt, time in enumerate( time_spec_d['time_list'] ) :
+     
+            print( now(), 'grid_maker.py: Processing time = ', time)
+            #print( now(), 'grid_maker.py: Processing time = ', tt)
+            if 'Ma' in time:
+     
+                # strip off units and make a number
+                time = float( time.replace('Ma', '') )
 
-    # Loop over times
-    for tt, time in enumerate( time_spec_d['time_list'] ) :
+                # determine what time steps are available for this age
+                # NOTE: 'temp' is requried to set which output files to check
+                found_d = Core_Citcom.find_available_timestep_from_age( master_d, 'temp', time )
+                
+                
+                print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
+                print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
+                print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
+
+                # set variables for subsequent loops
+                timestep = found_d['found_timestep']
+                runtime_Myr = found_d['found_runtime']
+
+                # convert the found age to an int
+                age_Ma = int(np.around( found_d['found_age'] ) )
+
+                # save age number for grids storage
+                age_Ma_storing=age_Ma
+                 
+                age_Ma = '%03d' % age_Ma
+
+            else:
+
+                time = float( time )
+                 
+                # determine what time steps are available for this timestep
+                # NOTE: 'temp' is requried to set which output files to check
+
+                found_d = Core_Citcom.find_available_timestep_from_timestep( master_d, 'temp', time )
+
+                print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
+                print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
+                print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
+
+                # set variables for subsequent loops
+                timestep = found_d['found_timestep']
+                runtime_Myr = found_d['found_runtime']
+
+                # convert the found age to an int
+                age_Ma = int(np.around( found_d['found_age'] ) )
+                
+                # make a string and pad with zeros
+                #age_Ma = '%03d' % age_Ma
+                age_Ma = str(age_Ma)
+                
+                # output dir add - RC
+                output_dir_age = int(np.around(found_d['found_age']))
+                
+                
+                
+    else:
+        #age_Ma = int(np.around(float(age_Ma)))
+        # Loop over times
+        for i, time in enumerate( time_spec_d['time_list'] ) :
  
-        print( now(), 'grid_maker.py: Processing time = ', time) 
-        #print( now(), 'grid_maker.py: Processing time = ', tt) 
-        if 'Ma' in time:
- 
-            # strip off units and make a number
-            time = float( time.replace('Ma', '') )
+            age_Ma = time_spec_d['age_Ma'][i]
+            runtime_Myr = time_spec_d['runtime_Myr'][i]
+        
+        timestep = str(pid_d["time_step"])
+        age_Ma = str(pid_d["time_spec"])
+        # output dir add - RC - Modified by Anders
+        output_dir_age = int(np.around(float(age_Ma)))
+        age_Ma_storing=age_Ma
 
-            # determine what time steps are available for this age 
-            # NOTE: 'temp' is requried to set which output files to check 
-            found_d = Core_Citcom.find_available_timestep_from_age( master_d, 'temp', time )
-            print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
-            print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
-            print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
-
-            # set variables for subsequent loops
-            timestep = found_d['found_timestep']
-            runtime_Myr = found_d['found_runtime']
-
-            # convert the found age to an int
-            age_Ma = int(np.around( found_d['found_age'] ) )
-
-            # save age number for grids storage
-            age_Ma_storing=age_Ma
-             
-            age_Ma = '%03d' % age_Ma
-
-        else:
-
-            time = float( time ) 
-             
-            # determine what time steps are available for this timestep 
-            # NOTE: 'temp' is requried to set which output files to check 
-
-            found_d = Core_Citcom.find_available_timestep_from_timestep( master_d, 'temp', time )
-
-            print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
-            print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
-            print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
-
-            # set variables for subsequent loops
-            timestep = found_d['found_timestep']
-            runtime_Myr = found_d['found_runtime']
-
-            # convert the found age to an int
-            age_Ma = int(np.around( found_d['found_age'] ) )
-            
-            # make a string and pad with zeros 
-            #age_Ma = '%03d' % age_Ma
-            age_Ma = str(age_Ma)
-            
-        # output dir add - RC
-        output_dir_age = int(np.around(found_d['found_age']))
 
         # report on integer age
         print( now(), '  age_Ma =', age_Ma)
@@ -248,7 +328,9 @@ def main():
         # cache for the file_format
         file_format_cache = ''
         
-
+        #ALTERNATIVE path for dynamic topographt re-starts - Andres
+        pathh = datadir
+        path = pathh.replace("%RANK", "")
         
         # Loop over sections (fields) 
         for ss, s in enumerate (control_d['_SECTIONS_'] ) :
@@ -319,49 +401,67 @@ def main():
             file_format = ''
             
             pos_for_abspath = datadir.find ("/Data")
+ 
             
-            # check for various data dirs
-            if os.path.exists( datadir + '/0/') :
-                
-                print( now(), 'grid_maker.py: path found = ', datadir + '/0/' )
-                file_format = datadir + '/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-
-            elif os.path.exists( datadir + '/' ) :
-                print( now(), 'grid_maker.py: path found = ', datadir + '/' )
-                file_format = datadir + '/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-
-            elif os.path.exists('data') :
-                print( now(), 'grid_maker.py: path found = ', 'data' )
-                file_format = './data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-
-            elif os.path.exists('Data') :
+            if int(Free_convection_flag) == 1:
+                #Use free convection style datadir - Andres
                 print( now(), 'grid_maker.py: path found = ', 'Data' )
-                file_format = './Data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
+                file_format = './Data/#/' + datafile + rf'_free_'+age_Ma+'Ma' + '.' + file_name_component + '.#.' + str(timestep)
+            
+            else:
+                # check for various data dirs
+                if os.path.exists( datadir + '/0/') :
+                    
+                    print( now(), 'grid_maker.py: path found = ', datadir + '/0/' )
+                    file_format = datadir + '/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
+
+                elif os.path.exists( datadir + '/' ) :
+                    print( now(), 'grid_maker.py: path found = ', datadir + '/' )
+                    file_format = datadir + '/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
+
+                elif os.path.exists('data') :
+                    print( now(), 'grid_maker.py: path found = ', 'data' )
+                    file_format = './data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
+                
+                    
+                elif os.path.exists('Data') :
+                    print( now(), 'grid_maker.py: path found = ', 'Data' )
+                    file_format = './Data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
+                    
+                
+                # Added path to dynamic topography post-processing - RC
+                elif os.path.exists('Age'+str(age_Ma)+'Ma') :
+                    print( now(), 'grid_maker.py: path found = ', datadir )
+                    file_format = './Age'+str(age_Ma)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
+                
+                # Added path to dynamic topography post-processing - RC
+                elif os.path.exists('Age'+str(output_dir_age)+'Ma') :
+                    print( now(), 'grid_maker.py: path found = ', datadir )
+                    file_format = './Age'+str(output_dir_age)+'xMa/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
+                
+                # Added path to dynamic topography post-processing - Andres
+                elif os.path.exists(path):
+                    print("New Dynamic topography condition")
+                    print( now(), 'grid_maker.py: path found = ', datadir )
+                    file_format = '.'+path+'/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
+                
+                # Added path to post-process with remote location - RC
+                elif os.path.exists(datadir[:pos_for_abspath]) :
+                        
+                     file_format = datadir[:pos_for_abspath]+'/data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
                 
             
-            # Added path to dynamic topography post-processing - RC
-            elif os.path.exists('Age'+str(age_Ma)+'Ma') :
-                print( now(), 'grid_maker.py: path found = ', datadir )
-                file_format = './Age'+str(age_Ma)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
-            
-            # Added path to dynamic topography post-processing - RC
-            elif os.path.exists('Age'+str(output_dir_age)+'Ma') :
-                print( now(), 'grid_maker.py: path found = ', datadir )
-                file_format = './Age'+str(output_dir_age)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
-            
-            # Added path to post-process with remote location - RC
-            elif os.path.exists(datadir[:pos_for_abspath]) :
-                    
-                 file_format = datadir[:pos_for_abspath]+'/data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-            
-            
-            # report error 
-            else :
-                print( now() )
-                print('ERROR: Cannot find output data.')
-                print('       Skipping this section.')
-                print( now(), 'grid_maker.py: file_format = ', file_format)
-                continue # to next section
+                # report error
+                else :
+                    print( now() )
+                    print('ERROR: Cannot find output data.')
+                    print('./Age'+str(age_Ma)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep))
+                    print('./Age'+str(output_dir_age)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep))
+                    print(datadir)
+                    print('       Skipping this section.')
+                    print( now(), 'grid_maker.py: file_format = ', file_format)
+                    continue # to next section
+                
             
             print( now(), 'grid_maker.py: file_format = ', file_format )
 
@@ -422,7 +522,7 @@ def main():
                 #depth = '%04d' % depth
                 depth=str(depth)
                 print( now(), '------------------------------------------------------------------------------')
-                print( now(), 'grid_maker.py: tt,ss,ll = ', tt, ',', ss, ',', ll, ';')
+                #print( now(), 'grid_maker.py: tt,ss,ll = ', tt, ',', ss, ',', ll, ';')
                 print( now(), 'grid_maker.py: summary for', s, ': timestep =', timestep, '; age =', age_Ma, '; runtime_Myr =', runtime_Myr, '; level =', level, '; depth =', depth, ' km; field_name =', field_name)
                 print( now(), '------------------------------------------------------------------------------')
 
