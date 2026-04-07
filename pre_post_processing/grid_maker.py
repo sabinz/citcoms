@@ -449,9 +449,9 @@ def main():
                     file_format = './Age'+str(age_Ma)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
                 
                 # Added path to dynamic topography post-processing - RC
-                elif os.path.exists('Age'+str(output_dir_age)+'Ma') :
-                    print( now(), 'grid_maker.py: path found = ', datadir )
-                    file_format = './Age'+str(output_dir_age)+'xMa/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
+#                elif os.path.exists('Age'+str(output_dir_age)+'Ma') :
+#                    print( now(), 'grid_maker.py: path found = ', datadir )
+#                    file_format = './Age'+str(output_dir_age)+'xMa/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
                 
                 # Added path to dynamic topography post-processing - Andres
                 elif os.path.exists(path):
