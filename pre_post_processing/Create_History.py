@@ -21,7 +21,7 @@
  processor OR the parallel infrastructure of CITerra.'''
 #=====================================================================
 #=====================================================================
-import glob, os, shutil, subprocess, sys, multiprocessing, traceback
+import datetime, glob, os, shutil, subprocess, sys, time, multiprocessing, traceback
 import Core_Util
 from Core_Util import now
 from subprocess import PIPE, Popen
@@ -391,11 +391,67 @@ def main():
         log_lock = Lock()
         results = []
 
+        # a real self-overwriting progress bar only makes sense when
+        # someone is actually watching an interactive terminal; when
+        # stdout is redirected to a log file (the common case for a
+        # cluster job) '\r' just gets written as a literal character,
+        # so fall back to the plain one-line-per-age form there
+        use_bar = sys.stdout.isatty()
+        start_time = time.time()
+        bar_dirty = [False] # mutable cell so the nested functions can flip it
+
+        # process_age()'s own per-age 'starting'/'done' lines are
+        # gated behind the module-level 'verbose' flag. With worker
+        # threads printing those concurrently and asynchronously
+        # relative to the bar, they'd get glued onto the end of the
+        # bar line instead of starting on a fresh one - the bar itself
+        # already conveys overall progress, so suppress the per-age
+        # chatter while it's active rather than fight it for the
+        # terminal line. Leave it untouched (still the primary signal)
+        # when there's no bar, e.g. output redirected to a log file.
+        global verbose
+        verbose = not use_bar
+
+        def end_progress_line():
+            '''Move off the in-progress bar line before printing
+            anything else (e.g. a CRITICAL banner or the final
+            summary), so that output doesn't get glued onto its end.'''
+            if bar_dirty[0]:
+                sys.stdout.write( '\n' )
+                sys.stdout.flush()
+                bar_dirty[0] = False
+        #end function
+
         def report_progress():
             done = len( results )
+            total = len( age_loop )
             failed_so_far = sum( 1 for r in results if r['status'] == 'failed' )
-            print( now(), 'progress: %d/%d ages done, %d failed so far' %
-                   (done, len(age_loop), failed_so_far) )
+
+            if not use_bar:
+                print( now(), 'progress: %d/%d ages done, %d failed so far' %
+                       (done, total, failed_so_far) )
+                return
+            #end if
+
+            frac = done / total if total else 1.0
+            width = 30
+            filled = int( round( frac*width ) )
+            bar = '#'*filled + '-'*(width-filled)
+
+            eta = ''
+            if 0 < done < total:
+                elapsed = time.time() - start_time
+                remaining = elapsed / done * (total-done)
+                eta = ' | ETA %s' % str( datetime.timedelta( seconds=int(remaining) ) )
+
+            line = '\r[%s] %d/%d (%3d%%) | %d failed%s' % \
+                   (bar, done, total, int(frac*100), failed_so_far, eta)
+            sys.stdout.write( line.ljust(100) )
+            sys.stdout.flush()
+            bar_dirty[0] = True
+
+            if done >= total:
+                end_progress_line()
         #end function
 
         # process the initial-condition age (always the oldest requested
@@ -418,6 +474,7 @@ def main():
             report_progress()
 
             if ic_result['status'] == 'failed':
+                end_progress_line()
                 print( now(), '=' * 70 )
                 print( now(), 'CRITICAL: initial-condition age %s FAILED - aborting the '
                                'rest of this run.' % oldest_age )
@@ -461,6 +518,7 @@ def main():
             #end with
         #end if
 
+        end_progress_line()
         sys.exit( report_summary( results, critical_log_path, warnings_log_path ) )
     # parallel branch
     else:
