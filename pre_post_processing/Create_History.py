@@ -398,10 +398,40 @@ def main():
                    (done, len(age_loop), failed_so_far) )
         #end function
 
+        # process the initial-condition age (always the oldest requested
+        # age) on its own, before any other age starts. Tracer IC
+        # generation in particular can be very memory-hungry, and that
+        # peak would otherwise land at exactly the moment every other
+        # worker is also starting up (its own heaviest point too) - the
+        # worst possible time for it. The IC age is also the one every
+        # other age's CitcomS run ultimately depends on, so a failure
+        # here is treated as critical and aborts the rest of this run
+        # immediately rather than burning compute on ages built on top
+        # of a broken initial condition.
+        remaining_ages = age_loop
+        if oldest_age is not None:
+            print( now(), 'processing initial-condition age %s on its own first...' % oldest_age )
+            ic_result = process_age( config_path, cwd, oldest_age, True,
+                                      control_d, overwrite_existing,
+                                      critical_log_path, log_lock )
+            results.append( ic_result )
+            report_progress()
+
+            if ic_result['status'] == 'failed':
+                print( now(), '=' * 70 )
+                print( now(), 'CRITICAL: initial-condition age %s FAILED - aborting the '
+                               'rest of this run.' % oldest_age )
+                print( now(), 'CRITICAL:', ic_result['detail'] )
+                print( now(), '=' * 70 )
+                sys.exit( report_summary( results, critical_log_path, warnings_log_path ) )
+            #end if
+
+            remaining_ages = age_loop[1:]
+        #end if
+
         if(serial):
-            for age in age_loop:
-                is_ic = (age == oldest_age)
-                results.append( process_age( config_path, cwd, age, is_ic,
+            for age in remaining_ages:
+                results.append( process_age( config_path, cwd, age, False,
                                  control_d, overwrite_existing,
                                  critical_log_path, log_lock ) )
                 report_progress()
@@ -420,11 +450,10 @@ def main():
             # to find and resume from
             with ThreadPoolExecutor( max_workers=cpuCount ) as executor:
                 futures = [
-                    executor.submit( process_age, config_path, cwd, age,
-                                      age == oldest_age, control_d,
-                                      overwrite_existing, critical_log_path,
-                                      log_lock )
-                    for age in age_loop
+                    executor.submit( process_age, config_path, cwd, age, False,
+                                      control_d, overwrite_existing,
+                                      critical_log_path, log_lock )
+                    for age in remaining_ages
                 ]
                 for future in as_completed( futures ):
                     results.append( future.result() )
