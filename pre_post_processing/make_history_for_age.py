@@ -765,11 +765,17 @@ def build_temperature_for_all_znodes( master ):
     # master node points [[lonDeg,latDeg,lonRad,colatRad,x,y,z], ...]
     # are computed only once for blob/silo ICs
     master_node_points = None
-    for kk in range( pid_d['nodez'] ):
+    nodez = pid_d['nodez']
+    for kk in range( nodez ):
 
         depth_km = int(coor_d['depth_km'][kk])
         suffix = '.%(depth_km)skm.' % vars() +str(control_d['age'])+'Ma.'
         control_d['suffix'] = suffix
+
+        # progress indication - this znode loop dominates per-age
+        # runtime, so a visible marker per depth level makes it clear
+        # a long-running age is actually progressing rather than hung
+        logging.info( 'znode %d/%d (depth=%skm)' % (kk+1, nodez, depth_km) )
 
         if verbose: print( '########################' )
         if verbose: print( now(), 'Depth=', str(depth_km), 'km' )
@@ -1295,18 +1301,44 @@ def track_grids_to_cap_list( master, grid_list, background, min, max ):
     value_by_cap = [[0]*cap_node for ii in range( nproc_surf )]
     track_file = 'track_grids_to_cap_list_track.xyz'
     if not track_file in rm_list: rm_list.append( track_file )
-    for zz, grid in enumerate( grid_list ):
-        for cc, cap_name in enumerate( coor_cap_names ):
-            data = value_by_cap[cc]
-            if grid is not None:
-                cmd = '%(cap_name)s -G%(grid)s -fg' % vars()
-                callgmt( 'grdtrack', cmd, '' , '>', track_file )
-                value = np.loadtxt( track_file, usecols=(2,), unpack=True )
-                value = np.clip( value, min, max )
-                value = np.around( value, decimals=6 ).tolist()
-            else: value = [ background for cc in range( nodex*nodey ) ]
-            for nn, entry in enumerate( value ):
-                data[ zz+nn*nodez ] = entry
+
+    # znodes with no grid (grid is None) need no GMT sampling at all -
+    # every node at that depth just takes the background value
+    sampled = [ (zz, grid) for zz, grid in enumerate( grid_list ) if grid is not None ]
+    none_zz = [ zz for zz, grid in enumerate( grid_list ) if grid is None ]
+
+    # grdtrack can sample several co-registered grids against the same
+    # point set in one call (one '-G<grid>' per grid, one extra output
+    # column per grid, in the same order). Previously this issued one
+    # grdtrack call per (znode, cap) pair - e.g. 65 znodes x 12 caps =
+    # 780 calls just for this one grid_list. Sampling every znode's
+    # grid for a given cap in a single call instead cuts that to one
+    # call per cap (e.g. 12), with identical values, since each call
+    # still only ever samples cap_name's own point set.
+    gflags = ' '.join( '-G%s' % grid for zz, grid in sampled )
+
+    for cc, cap_name in enumerate( coor_cap_names ):
+        logging.info( 'track_grids_to_cap_list: cap %d/%d' % (cc+1, len(coor_cap_names)) )
+        data = value_by_cap[cc]
+
+        for zz in none_zz:
+            for nn in range( nodex*nodey ):
+                data[ zz+nn*nodez ] = background
+
+        if sampled:
+            cmd = '%(cap_name)s %(gflags)s -fg' % vars()
+            callgmt( 'grdtrack', cmd, '', '>', track_file )
+            # ndmin=2 guards the (unlikely) single-point-cap case, where
+            # loadtxt would otherwise collapse to a 1-D array
+            table = np.loadtxt( track_file, ndmin=2 )
+            # columns 0,1 are lon,lat; one value column per sampled
+            # grid thereafter, in the same order as 'sampled'
+            values = np.clip( table[:, 2:2+len(sampled)], min, max )
+            values = np.around( values, decimals=6 )
+            for col, (zz, grid) in enumerate( sampled ):
+                column = values[:, col].tolist()
+                for nn, entry in enumerate( column ):
+                    data[ zz+nn*nodez ] = entry
 
     return value_by_cap
 
@@ -2802,7 +2834,7 @@ def make_ivel_stencil_by_cap( master ):
 
     '''Make the velocity stencil.'''
 
-    if verbose: print( now(), 'make_ivel_stencil_by_cap:' )
+    logging.debug( 'make_ivel_stencil_by_cap:' )
 
     t0 = time.time() # start time
     coor_d = master['coor_d']
@@ -2830,9 +2862,9 @@ def make_ivel_stencil_by_cap( master ):
     velocity_grids = func_d['velocity_grid_names']
     vertical_slab_depth = control_d['vertical_slab_depth']
 
-    in_filename = 'sample_point.xy'
+    in_filename = 'sample_points.xy'
     rm_list.append( in_filename )
-    out_filename = 'sample_point_velocity.xy'
+    out_filename = 'sample_points_velocity.xy'
     rm_list.append( out_filename )
 
     # need to reverse depth_km for bisect to work correctly
@@ -2862,6 +2894,17 @@ def make_ivel_stencil_by_cap( master ):
     if DEBUG:
         debug_filename = 'debug_ivel.%(age)s.xy' % vars()
         debug_file = open( debug_filename, 'w' )
+
+    # --- phase 1: walk the subduction-zone line data exactly as
+    # before, but instead of calling GMT inline (one grdtrack
+    # subprocess per point per velocity grid - easily thousands of
+    # spawns for a global subduction network) just record where each
+    # candidate node needs to be sampled (tlon, tlat), plus everything
+    # needed to finish that point's computation once the sample is
+    # available. The actual sampling happens once, in a single batched
+    # call per velocity grid, in phase 2 below.
+    sample_points = [] # (tlon, tlat) per pending point, in order
+    pending = []        # carried-forward state per pending point, same order
 
     # loop over line data
     for line in open( ivel_slab_age_xyz ):
@@ -2893,7 +2936,7 @@ def make_ivel_stencil_by_cap( master ):
                 depth = sten_depth - cc*(sten_depth-start_depth)
                 depth_list.append( depth )
 
-            if verbose: print( now(), 'depth_list=', depth_list )
+            logging.debug( 'depth_list=%s' % depth_list )
             dist_list = []
             radius_list = []
             znode_list = []
@@ -2928,8 +2971,8 @@ def make_ivel_stencil_by_cap( master ):
             # and 336 km are available
             if SYNTHETIC and len(znode_list) < 2: znode_list = []
 
-            if verbose: print( now(), 'znode_list=', znode_list )
-            if verbose: print( now(), 'radius_list=', radius_list )
+            logging.debug( 'znode_list=%s' % znode_list )
+            logging.debug( 'radius_list=%s' % radius_list )
 
             # map from surface node to global for each depth
             map = []
@@ -2960,7 +3003,7 @@ def make_ivel_stencil_by_cap( master ):
                 dist = dist_list[nn]
                 rad = radius_list[nn]
 
-                print( line_segment )
+                logging.debug( line_segment )
 
                 # nearest node to find stencil node
                 nlon, nlat = Core_Util.get_point_normal_to_subduction_zone(
@@ -2982,24 +3025,14 @@ def make_ivel_stencil_by_cap( master ):
                                  plon, plat, dx, dy, 0.5, polarity )
                 vpoint = Core_Util.convert_point_to_cartesian( vlon, vlat, rad )
                 slab_normal = (vpoint-tpoint) / np.linalg.norm( vpoint-tpoint )
-                print( 'slab_normal=', slab_normal )
 
                 # radial normal to subduction zone (at this depth)
                 wpoint = Core_Util.convert_point_to_cartesian( ulon, ulat, rad-0.005 )
                 slab_radial = (upoint-wpoint) / np.linalg.norm( upoint-wpoint )
-                print( 'slab_radial', slab_radial )
 
                 # normal parallel to subduction zone (at this depth)
-                # method 1:
-                # orientation follows the way the line data is stored
-                #pppoint = Core_Util.convert_point_to_cartesian( pplon, pplat, rad )
-                #cpoint = Core_Util.convert_point_to_cartesian( clon, clat, rad )
-                #slab_parallel2 = (cpoint-pppoint) / np.linalg.norm( cpoint-pppoint )
-                #print( 'slab_parallel2=', slab_parallel2 )
-                # method 2:
                 slab_parallel = np.cross( slab_normal, slab_radial )
-                print( 'slab_parallel=', slab_parallel )
-    
+
                 # ---------------------------------------------------
                 # ------------------- velocities --------------------
                 # ---------------------------------------------------
@@ -3012,130 +3045,144 @@ def make_ivel_stencil_by_cap( master ):
                     tlon, tlat = Core_Util.get_point_normal_to_subduction_zone(
                                      plon, plat, dx, dy, -4, polarity )
 
-                with open( in_filename, 'w' ) as f:
-                    f.write( '%(tlon)s %(tlat)s' % vars() )
+                sample_points.append( (tlon, tlat) )
+                pending.append( {
+                    'ulon': ulon, 'ulat': ulat,
+                    'slab_normal': slab_normal, 'slab_parallel': slab_parallel,
+                    'plon': plon, 'plat': plat, 'dx': dx, 'dy': dy,
+                    'dist': dist, 'polarity': polarity, 'rad': rad,
+                    'nlon': nlon, 'nlat': nlat, 'npoint': npoint,
+                    'slab_dip': slab_dip, 'map': map, 'nn': nn,
+                } )
 
-                components = [] # store v_theta, v_phi, v_radius
-                for grid in velocity_grids:
-                    Core_Util.find_value_on_line( in_filename, grid,
-                                                        out_filename )
-                    data = np.loadtxt( out_filename )[2]
-                    components.append( data )
-                components.append( 0 ) # vr always zero
-                vtpr = np.array( components )
-                print( 'vtpr=', vtpr )
-                vxyz = Core_Util.get_cartesian_velocity_for_point(
-                                              ulon, ulat, vtpr )
-                print( 'vxyz=', vxyz )
-                print( 'mod(vxyz)=', np.linalg.norm( vxyz ) )
+                if len( pending ) % 2000 == 0:
+                    logging.info( 'make_ivel_stencil_by_cap: collected %d candidate '
+                                  'ivel points so far' % len(pending) )
 
-                #slab_parallel_velocity2 = np.dot( slab_parallel2, vxyz )
-                #print( 'slab_parallel_velocity2=', slab_parallel_velocity2 )
+    logging.info( 'make_ivel_stencil_by_cap: collected %d candidate ivel points total' %
+                  len(pending) )
 
-                slab_parallel_velocity = np.dot( slab_parallel, vxyz )
-                print( 'slab_parallel_velocity=', slab_parallel_velocity )
+    # --- phase 2: sample every velocity grid ONCE for all pending
+    # points at once (one grdtrack call per grid instead of one call
+    # per point per grid), then finish each point's computation
+    # exactly as before.
+    if pending:
+        with open( in_filename, 'w' ) as f:
+            for tlon, tlat in sample_points:
+                f.write( '%s %s\n' % (tlon, tlat) )
 
-                subduction_velocity = np.dot( slab_normal, vxyz )
-                print( 'subduction_velocity=', subduction_velocity )
+        # one column of sampled values per velocity grid, in the same
+        # point order as 'sample_points' / 'pending'
+        sampled_components = []
+        for grid in velocity_grids:
+            Core_Util.find_value_on_line( in_filename, grid, out_filename )
+            column = np.loadtxt( out_filename, usecols=(2,), ndmin=1 )
+            sampled_components.append( column )
 
-                # negative subduction velocity means that there is no
-                # convergence (actually means there is divergence).
-                #  In this case, do not construct ivbcs and just skip
-                # to the next entry in the loop
-                if subduction_velocity < 0 : continue
+        for ii, state in enumerate( pending ):
+            if ii and ii % 2000 == 0:
+                logging.info( 'make_ivel_stencil_by_cap: processed %d/%d ivel points' %
+                              (ii, len(pending)) )
 
-                # ---------------------------------------------------
-                # ------------ local xyz coordinate axes ------------
-                # ---------------------------------------------------
-                # normal at slab location (about dist)
-                x1lon, x1lat = Core_Util.get_point_normal_to_subduction_zone(
-                                 plon, plat, dx, dy, dist-0.5, polarity )
-                x1 = Core_Util.convert_point_to_cartesian( x1lon, x1lat, rad )
-                x2lon, x2lat = Core_Util.get_point_normal_to_subduction_zone(
-                                 plon, plat, dx, dy, dist+0.5, polarity )
-                x2 = Core_Util.convert_point_to_cartesian( x2lon, x2lat, rad )
+            ulon = state['ulon']; ulat = state['ulat']
+            slab_normal = state['slab_normal']; slab_parallel = state['slab_parallel']
+            plon = state['plon']; plat = state['plat']
+            dx = state['dx']; dy = state['dy']
+            dist = state['dist']; polarity = state['polarity']; rad = state['rad']
+            nlon = state['nlon']; nlat = state['nlat']; npoint = state['npoint']
+            slab_dip = state['slab_dip']; map = state['map']; nn = state['nn']
 
-                x3 = Core_Util.convert_point_to_cartesian( nlon, nlat, rad-0.005 )
+            components = [ col[ii] for col in sampled_components ] # v_theta, v_phi
+            components.append( 0 ) # vr always zero
+            vtpr = np.array( components )
 
-                hori_norm = (x2-x1) / np.linalg.norm( x2-x1 )
-                print( 'hori_norm=', hori_norm )
-                vert_norm = (npoint-x3) / np.linalg.norm( npoint-x3 )
-                print( 'vert_norm=', vert_norm )
-                out_norm = np.cross( hori_norm, vert_norm )
-                #out_norm = slab_parallel # TESTING
-                print( 'out_norm=', out_norm )
+            vxyz = Core_Util.get_cartesian_velocity_for_point( ulon, ulat, vtpr )
+            logging.debug( 'vxyz=%s' % vxyz )
+            logging.debug( 'mod(vxyz)=%s' % np.linalg.norm( vxyz ) )
 
-                # ---------------------------------------------------
-                # --------- partition velocity between comps --------
-                # ---------------------------------------------------
-                hori_velo = subduction_velocity * np.cos( slab_dip ) \
-                                * hori_norm
-                # always negative because into the mantle
-                vert_velo = -np.absolute(subduction_velocity) * \
-                                np.sin( slab_dip ) * vert_norm
-                # 'out' meaning 'out-of-plane' velocity
-                #out_velo2 = slab_parallel_velocity2 * out_norm
-                #print( 'out_velo2=', out_velo2 )
+            slab_parallel_velocity = np.dot( slab_parallel, vxyz )
+            logging.debug( 'slab_parallel_velocity=%s' % slab_parallel_velocity )
 
-                out_velo = slab_parallel_velocity * out_norm
-                #out_velo *= -1 # XXX HACK - probably should be function of sz polarity
-                print( 'out_velo=', out_velo )
+            subduction_velocity = np.dot( slab_normal, vxyz )
+            logging.debug( 'subduction_velocity=%s' % subduction_velocity )
 
-                # ---------------------------------------------------
-                # --------- map to v_theta, v_phi, v_radius ---------
-                # ---------------------------------------------------
-                #oper2 = np.concatenate((hori_velo, vert_velo, out_velo2))
-                #oper2 = oper2.reshape(3,3).T
-                #print( 'oper2=', oper2)
-                #vxyz_out2 = np.dot(oper2, np.array( [1,1,1] ) ) # vx, vy, vz
-                #vtpr_out2 = Core_Util.get_spherical_velocity_for_point(
-                #               npoint, vxyz_out2 )
+            # negative subduction velocity means that there is no
+            # convergence (actually means there is divergence).
+            #  In this case, do not construct ivbcs and just skip
+            # to the next entry
+            if subduction_velocity < 0 : continue
 
-                #print( 'vtpr_out2=', vtpr_out2 )
+            # ---------------------------------------------------
+            # ------------ local xyz coordinate axes ------------
+            # ---------------------------------------------------
+            # normal at slab location (about dist)
+            x1lon, x1lat = Core_Util.get_point_normal_to_subduction_zone(
+                             plon, plat, dx, dy, dist-0.5, polarity )
+            x1 = Core_Util.convert_point_to_cartesian( x1lon, x1lat, rad )
+            x2lon, x2lat = Core_Util.get_point_normal_to_subduction_zone(
+                             plon, plat, dx, dy, dist+0.5, polarity )
+            x2 = Core_Util.convert_point_to_cartesian( x2lon, x2lat, rad )
 
-                oper = np.concatenate((hori_velo, vert_velo, out_velo))
-                oper = oper.reshape(3,3).T
-                print( 'oper=', oper)
-                vxyz_out = np.dot(oper, np.array( [1,1,1] ) ) # vx, vy, vz
-                vtpr_out = Core_Util.get_spherical_velocity_for_point(
-                               npoint, vxyz_out )
+            x3 = Core_Util.convert_point_to_cartesian( nlon, nlat, rad-0.005 )
 
-                print( 'vtpr_out=', vtpr_out )
+            hori_norm = (x2-x1) / np.linalg.norm( x2-x1 )
+            vert_norm = (npoint-x3) / np.linalg.norm( npoint-x3 )
+            out_norm = np.cross( hori_norm, vert_norm )
 
-                # KDTree
-                # this determines the closest point in the coarsest
-                # multigrid mesh
-                # XXX DJB TODO: this cannot handle the prime meridian,
-                # which probably means that shared nodes are not captured
-                # across 359-0 degrees longitude
-                min_dist, min_index = KDTree_all.query( np.array( (nlon, nlat) ) )
-                min_point = coarse_coor_by_cap_flatten[ min_index ]
+            # ---------------------------------------------------
+            # --------- partition velocity between comps --------
+            # ---------------------------------------------------
+            hori_velo = subduction_velocity * np.cos( slab_dip ) \
+                            * hori_norm
+            # always negative because into the mantle
+            vert_velo = -np.absolute(subduction_velocity) * \
+                            np.sin( slab_dip ) * vert_norm
+            # 'out' meaning 'out-of-plane' velocity
+            out_velo = slab_parallel_velocity * out_norm
 
-                # now use this point to find closest point in finest
-                # mesh for each cap
-                # first, check that point in coarse mesh is relatively close
-                # to the slab center line.  Maybe try 1 degree initially?
-                if min_dist < 1: # one degree criteria (note Cartesian approximation)
-                    for cc in range( nproc_surf ):
-                        tree = KDTree_by_cap[cc]
-                        cap_dist, cap_index = tree.query( np.array( min_point ) )
-                        print( cap_dist, cap_index )
-                        # set tolerance such that all shared nodes in every
-                        # cap are included
-                        print('Searching for', min_point)
-                        if cap_dist < 0.001: # within 0.001 degrees to catch shared nodes
-                            dlon, dlat = coor_by_cap[cc][cap_index]
-                            print('Found (%f,%f) in cap %d, index %d' % (dlon, dlat, cc, cap_index))
-                            
-                            map_index = map[cap_index][nn]
-                            stencil_by_cap[cc][ map_index ] = 1
-                            velocity_by_cap[cc][ map_index ] = tuple( vtpr_out )
+            # ---------------------------------------------------
+            # --------- map to v_theta, v_phi, v_radius ---------
+            # ---------------------------------------------------
+            oper = np.concatenate((hori_velo, vert_velo, out_velo))
+            oper = oper.reshape(3,3).T
+            vxyz_out = np.dot(oper, np.array( [1,1,1] ) ) # vx, vy, vz
+            vtpr_out = Core_Util.get_spherical_velocity_for_point(
+                           npoint, vxyz_out )
 
-                            if DEBUG:
-                                line_out = '%(cc)s %(map_index)s %(dlon)s %(dlat)s %(rad)s %(slab_parallel_velocity)s %(subduction_velocity)s ' % vars()
-                                line_out += ' '.join( '%s' % x for x in vtpr_out )
-                                print( 'Writing:', line_out )
-                                debug_file.write( line_out+'\n' )
+            # KDTree
+            # this determines the closest point in the coarsest
+            # multigrid mesh
+            # XXX DJB TODO: this cannot handle the prime meridian,
+            # which probably means that shared nodes are not captured
+            # across 359-0 degrees longitude
+            min_dist, min_index = KDTree_all.query( np.array( (nlon, nlat) ) )
+            min_point = coarse_coor_by_cap_flatten[ min_index ]
+
+            # now use this point to find closest point in finest
+            # mesh for each cap
+            # first, check that point in coarse mesh is relatively close
+            # to the slab center line.  Maybe try 1 degree initially?
+            if min_dist < 1: # one degree criteria (note Cartesian approximation)
+                for cc in range( nproc_surf ):
+                    tree = KDTree_by_cap[cc]
+                    cap_dist, cap_index = tree.query( np.array( min_point ) )
+                    # set tolerance such that all shared nodes in every
+                    # cap are included
+                    logging.debug( 'cap_dist=%s cap_index=%s searching for %s' %
+                                   (cap_dist, cap_index, min_point) )
+                    if cap_dist < 0.001: # within 0.001 degrees to catch shared nodes
+                        dlon, dlat = coor_by_cap[cc][cap_index]
+                        logging.debug( 'Found (%f,%f) in cap %d, index %d' %
+                                       (dlon, dlat, cc, cap_index) )
+
+                        map_index = map[cap_index][nn]
+                        stencil_by_cap[cc][ map_index ] = 1
+                        velocity_by_cap[cc][ map_index ] = tuple( vtpr_out )
+
+                        if DEBUG:
+                            line_out = '%(cc)s %(map_index)s %(dlon)s %(dlat)s %(rad)s %(slab_parallel_velocity)s %(subduction_velocity)s ' % vars()
+                            line_out += ' '.join( '%s' % x for x in vtpr_out )
+                            debug_file.write( line_out+'\n' )
 
     # close debug file
     if DEBUG: debug_file.close()
@@ -3143,7 +3190,7 @@ def make_ivel_stencil_by_cap( master ):
     # runtime of this function
     t1 = time.time() # end time
     timefmt = str(datetime.timedelta(seconds=t1-t0))
-    print( now(), 'make_ivel_stencil_by_cap: runtime', timefmt )
+    logging.info( 'make_ivel_stencil_by_cap: runtime %s' % timefmt )
 
     # update dictionary
     func_d['ivel_stencil_by_cap'] = stencil_by_cap
