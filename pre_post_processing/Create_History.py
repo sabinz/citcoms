@@ -138,6 +138,23 @@ def format_duration( seconds ):
 #====================================================================
 #====================================================================
 #====================================================================
+def tail_log_line( log_path ):
+    '''Best-effort read of the last non-empty line of a per-age log -
+    used to surface live progress (e.g. during the initial-condition
+    heartbeat) instead of a bare "still running" ping. Returns '' if
+    the file doesn't exist yet, is empty, or can't be read (e.g. the
+    subprocess hasn't created it yet).'''
+    try:
+        with open( log_path ) as f:
+            lines = [ line.rstrip() for line in f if line.strip() ]
+        return lines[-1] if lines else ''
+    except (IOError, OSError):
+        return ''
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
 def log_critical( critical_log_path, lock, message ):
     '''Thread-safe append of a timestamped message to the critical log.'''
     with lock:
@@ -583,8 +600,11 @@ def main():
             while ic_thread.is_alive():
                 ic_thread.join( timeout=heartbeat_interval )
                 if ic_thread.is_alive():
-                    print( now(), 'still processing initial-condition age %s... (%s elapsed)' %
-                           (oldest_age, format_duration( time.time() - ic_start )) )
+                    last_line = tail_log_line( ic_log_path )
+                    detail = ' | latest: %s' % last_line if last_line else \
+                             ' | (no log output yet)'
+                    print( now(), 'still processing initial-condition age %s... (%s elapsed)%s' %
+                           (oldest_age, format_duration( time.time() - ic_start ), detail) )
             #end while
 
             ic_result = ic_outcome['result']
