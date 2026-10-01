@@ -1020,11 +1020,25 @@ UM_advection = 1.0 ; non-dim factor
 LM_advection = 3.0 ; non-dim factor
 vertical_slab_depth = 660.0 ; depth at which to make slabs vertical
 
+# scales the slab's thermal anomaly (colder slab reduces slab
+# break-off). Despite the name, this is NOT gated by
+# BUILD_WEAK_INTERFACE below - it is read unconditionally in the core
+# slab temperature construction (Core_Util.make_slab_temperature_xyz)
+# whenever BUILD_SLAB is True, so it is required regardless of the
+# weak-interface toggle. 1.0 reproduces the original (pre-this-factor)
+# behaviour; lower values make the slab colder.
+SLAB_STRENGTH_FACTOR = 1.0
+
 # GPML_HEADER must be True for subduction initiation
 GPML_HEADER = True ; override defaults with GPML header data
 slab_UM_descent_rate = 3.0 ; cm/yr
 # from van der Meer et al. (2010)
 slab_LM_descent_rate = 1.2 ; cm/yr
+
+# optional additional depth cutoff for slab temperature assimilation,
+# beyond whatever other depth limits already apply (e.g. slab_depth_gen).
+# 0 (default) disables this extra cutoff - no behaviour change.
+MAX_ASSIMILATION_DEPTH = 0 ; km - 0 disables this cutoff
 
 FLAT_SLAB = False ; include flat slabs
 
@@ -1032,6 +1046,16 @@ FLAT_SLAB = False ; include flat slabs
 # with LTBL, the temperature of the CMB is always 1
 BUILD_LTBL  = False ; lower thermal boundary layer
 ltbl_age = 300.0 ; age (Ma) of tbl
+
+# weak interface along the top of the subducting slab - a newer,
+# less-documented feature. Defaults to off; the two parameters below
+# are only read at all when this is True, and are conservative
+# placeholders (not verified physically-motivated defaults) - treat
+# them as "must be set deliberately before turning this on", not as
+# tuned values.
+BUILD_WEAK_INTERFACE = False ; weak interface along top of slab
+MAX_DEPTH_WEAK_INTERFACE = 300.0 ; km - placeholder, verify before enabling
+WEAK_INTERFACE_TEMP_CAP = 1.0 ; mantle temperature is divided by this factor - placeholder, verify before enabling
 
 # thermal blobs
 BUILD_BLOB = False ; thermal blobs
@@ -1146,6 +1170,9 @@ no_tracer_max_depth = 2604 ; km
 SYNTHETIC = False ; master switch for synthetic regional models
 OUTPUT_BVEL = True ; output velocity boundary conditions
 bvel_dir = %(cwd)s/bvel ; bvel
+# only used by make_synthetic_age_grid (SYNTHETIC models only) -
+# distinct from oceanic_lith_age_max above
+lith_age_max = 300.0 ; Ma - synthetic age grid clip, SYNTHETIC only
 fi_trench = 0.8 ; radians
 TRENCH_CURVING = False
 curving_trench_lat = 0.0 ; degrees
