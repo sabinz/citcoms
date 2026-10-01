@@ -766,6 +766,20 @@ def build_temperature_for_all_znodes( master ):
     # are computed only once for blob/silo ICs
     master_node_points = None
     nodez = pid_d['nodez']
+
+    # the adiabat offset is a function only of depth and static
+    # config/mesh constants (see adiabat_temp_increment) - it is safe
+    # to fold it into include_lithosphere's own grdmath call instead
+    # of a separate full-grid round trip afterward, but ONLY when
+    # nothing later in the pipeline can still touch the grid for this
+    # run. Those later stages are enabled/disabled for the whole run
+    # (not per znode), so this check is valid for every znode alike.
+    fuse_adiabat_into_lithosphere = ( control_d['BUILD_ADIABAT']
+        and not control_d['BUILD_LTBL']
+        and not control_d['BUILD_BLOB']
+        and not control_d['BUILD_SILO']
+        and not control_d['BUILD_WEAK_INTERFACE'] )
+
     for kk in range( nodez ):
 
         depth_km = int(coor_d['depth_km'][kk])
@@ -807,9 +821,17 @@ def build_temperature_for_all_znodes( master ):
         slab_grid_list.append( slab_grids )
 
         # lithosphere temperature (always include for slab assimilation)
+        adiabat_done = False
         if control_d['BUILD_LITHOSPHERE'] or control_d['BUILD_SLAB']:
+            extra_add = adiabat_temp_increment( control_d, pid_d, coor_d, kk ) \
+                        if fuse_adiabat_into_lithosphere else None
             temp_grid, lith_grid = include_lithosphere( master,
-                                         temp_grid, kk )
+                                         temp_grid, kk, extra_add )
+            # lith_grid is None whenever include_lithosphere took its
+            # early-exit path (this depth is below lith_depth_gen) - in
+            # that case extra_add was never actually applied, and the
+            # standalone adiabat call below is still required
+            adiabat_done = fuse_adiabat_into_lithosphere and lith_grid is not None
         else: lith_grid = None
 
         # lower thermal boundary layer
@@ -845,8 +867,9 @@ def build_temperature_for_all_znodes( master ):
                     if verbose: print( now(), cmd )
                     subprocess.call( cmd, shell=True )
 
-        # adiabat
-        if control_d['BUILD_ADIABAT']:
+        # adiabat - skipped here if it was already folded into
+        # include_lithosphere's grdmath call above (adiabat_done)
+        if control_d['BUILD_ADIABAT'] and not adiabat_done:
             temp_grid = include_adiabat(
                               master, temp_grid, kk )
 
@@ -1476,6 +1499,24 @@ def get_global_data( master_d ):
 #=====================================================================
 #=====================================================================
 #=====================================================================
+def adiabat_temp_increment( control_d, pid_d, coor_d, kk ):
+
+    '''Return the linear adiabatic temperature increase for znode kk.
+       This is a scalar that depends only on depth and static
+       config/mesh constants (not on the model state at this age), so
+       it is cheap to compute ahead of time and, where safe, fold into
+       another grid operation instead of its own grdmath round trip.'''
+
+    adiabat_temp_drop = control_d['adiabat_temp_drop']
+    radius_inner = pid_d['radius_inner']
+    radius_outer = pid_d['radius_outer']
+    depth = coor_d['depth'][kk]
+
+    return adiabat_temp_drop * depth/(radius_outer-radius_inner)
+
+#=====================================================================
+#=====================================================================
+#=====================================================================
 def include_adiabat( master, master_grid, kk):
 
     '''Include a simple linear temperature increase across the whole
@@ -1488,30 +1529,41 @@ def include_adiabat( master, master_grid, kk):
     coor_d = master['coor_d']
     control_d = master['control_d']
     pid_d = master['pid_d']
-    adiabat_temp_drop = control_d['adiabat_temp_drop']
-    radius_inner = pid_d['radius_inner']
-    radius_outer = pid_d['radius_outer']
 
-    depth = coor_d['depth'][kk]
+    add_temp = adiabat_temp_increment( control_d, pid_d, coor_d, kk )
+
+    # at the surface znode (depth=0) this is exactly zero - skip the
+    # grdmath round trip entirely rather than add a no-op
+    if add_temp == 0:
+        return master_grid
 
     # include linear adiabat
-    add_temp = adiabat_temp_drop * depth/(radius_outer-radius_inner)
     cmd = master_grid + ' ' + str(add_temp) + ' ADD'
     callgmt( 'grdmath', cmd, '', '=', master_grid )
-    
+
     return master_grid
 
 #=====================================================================
 #=====================================================================
 #=====================================================================
-def include_lithosphere( master, master_grid, kk ):
+def include_lithosphere( master, master_grid, kk, extra_add=None ):
 
     '''Include the thermal profile of the lithosphere according to the
        age grid or a constant age.  N.B. This function actually
        computes the lithosphere temperature without considering the
        temperature drop across the lithosphere.  The temperature drop
        scaling is introduced by the multiplication with the
-       master_grid in the final GMT call.'''
+       master_grid in the final GMT call.
+
+       extra_add, if given, is added to the result in that same final
+       GMT call (e.g. to fold in the adiabat offset - see
+       adiabat_temp_increment and build_temperature_for_all_znodes -
+       instead of paying for a separate grdmath round trip
+       immediately afterward). Only applied when this function
+       actually reaches the final call; if it takes the early-exit
+       path below (this depth has no lithosphere), extra_add is
+       silently NOT applied, and the caller is responsible for
+       noticing (via lith_grid being None) and applying it elsewhere.'''
 
     if verbose: print( now(), 'include_lithosphere:' )
 
@@ -1555,8 +1607,10 @@ def include_lithosphere( master, master_grid, kk ):
         grid = str( val )
 
     cmd = master_grid + ' ' + grid + ' MUL'
+    if extra_add is not None:
+        cmd += ' ' + str(extra_add) + ' ADD'
     callgmt( 'grdmath', cmd, '', '=', master_grid )
-    
+
     return master_grid, grid
 
 #=====================================================================
