@@ -1330,38 +1330,52 @@ def track_grids_to_cap_list( master, grid_list, background, min, max ):
     sampled = [ (zz, grid) for zz, grid in enumerate( grid_list ) if grid is not None ]
     none_zz = [ zz for zz, grid in enumerate( grid_list ) if grid is None ]
 
-    # grdtrack can sample several co-registered grids against the same
-    # point set in one call (one '-G<grid>' per grid, one extra output
-    # column per grid, in the same order). Previously this issued one
-    # grdtrack call per (znode, cap) pair - e.g. 65 znodes x 12 caps =
-    # 780 calls just for this one grid_list. Sampling every znode's
-    # grid for a given cap in a single call instead cuts that to one
-    # call per cap (e.g. 12), with identical values, since each call
-    # still only ever samples cap_name's own point set.
-    gflags = ' '.join( '-G%s' % grid for zz, grid in sampled )
-
-    for cc, cap_name in enumerate( coor_cap_names ):
-        logging.info( 'track_grids_to_cap_list: cap %d/%d' % (cc+1, len(coor_cap_names)) )
+    for cc in range( nproc_surf ):
         data = value_by_cap[cc]
-
         for zz in none_zz:
             for nn in range( nodex*nodey ):
                 data[ zz+nn*nodez ] = background
 
-        if sampled:
-            cmd = '%(cap_name)s %(gflags)s -fg' % vars()
-            callgmt( 'grdtrack', cmd, '', '>', track_file )
-            # ndmin=2 guards the (unlikely) single-point-cap case, where
-            # loadtxt would otherwise collapse to a 1-D array
-            table = np.loadtxt( track_file, ndmin=2 )
-            # columns 0,1 are lon,lat; one value column per sampled
-            # grid thereafter, in the same order as 'sampled'
-            values = np.clip( table[:, 2:2+len(sampled)], min, max )
-            values = np.around( values, decimals=6 )
-            for col, (zz, grid) in enumerate( sampled ):
-                column = values[:, col].tolist()
-                for nn, entry in enumerate( column ):
-                    data[ zz+nn*nodez ] = entry
+    if not sampled:
+        return value_by_cap
+
+    # NOTE: an earlier version of this function batched multiple grids
+    # into one grdtrack call per cap (one '-G<grid>' per znode, up to
+    # ~65 at once). That crashed GMT 6.4.0 outright - a SIGILL inside
+    # __sprintf_chk, i.e. GMT's own internal buffer overflowing once
+    # given that many simultaneous -G flags (confirmed in practice,
+    # not a hypothetical). Batching along the *points* axis instead -
+    # one grid, one '-G' flag, but every cap's points combined into a
+    # single call - avoids that failure mode entirely: it's the same
+    # one-grid-per-call pattern already proven safe, just with more
+    # points per call, which grdtrack already handles fine elsewhere
+    # in this codebase (e.g. the IC tracer sampling, at far larger
+    # point counts than this).
+    combined_points = 'track_grids_to_cap_list_allcaps.xy'
+    if not combined_points in rm_list: rm_list.append( combined_points )
+    with open( combined_points, 'w' ) as out:
+        for cap_name in coor_cap_names:
+            with open( cap_name ) as f:
+                out.write( f.read() )
+
+    points_per_cap = nodex*nodey
+
+    for ii, (zz, grid) in enumerate( sampled ):
+        logging.info( 'track_grids_to_cap_list: grid %d/%d' % (ii+1, len(sampled)) )
+        cmd = '%(combined_points)s -G%(grid)s -fg' % vars()
+        callgmt( 'grdtrack', cmd, '', '>', track_file )
+        # one -G flag -> exactly one value column (index 2); ndmin=1
+        # guards the (unlikely) single-point-total case
+        column = np.loadtxt( track_file, usecols=(2,), ndmin=1 )
+        column = np.clip( column, min, max )
+        column = np.around( column, decimals=6 )
+
+        for cc in range( nproc_surf ):
+            data = value_by_cap[cc]
+            start = cc * points_per_cap
+            cap_column = column[start:start+points_per_cap].tolist()
+            for nn, entry in enumerate( cap_column ):
+                data[ zz+nn*nodez ] = entry
 
     return value_by_cap
 
