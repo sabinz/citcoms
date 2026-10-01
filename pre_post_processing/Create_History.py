@@ -35,6 +35,12 @@ verbose = True
 # that accumulates every critical failure encountered while building
 # per-age history files
 CRITICAL_LOG_FILENAME = 'critical_errors.log'
+
+# name of the file that tallies non-fatal WARNING/ERROR-ish text found
+# in per-age logs (almost always raw GMT stderr chatter) - informational
+# only, kept separate from CRITICAL_LOG_FILENAME so real failures are
+# never buried among routine GMT noise
+WARNINGS_LOG_FILENAME = 'warnings_summary.log'
 #=====================================================================
 #=====================================================================
 #=====================================================================
@@ -133,6 +139,55 @@ def log_critical( critical_log_path, lock, message ):
 #====================================================================
 #====================================================================
 #====================================================================
+def extract_critical_lines( log_path ):
+    '''Pull out every logging.critical(...) line (tagged 'CRITICAL' by
+    the standard logging format) from a per-age log.  make_history_for_age.py
+    now logs a CRITICAL line immediately before every fatal exit, so this
+    is the actual root cause of a failure - not just a pointer to a file
+    the user has to go open.'''
+    lines = []
+    try:
+        with open( log_path ) as f:
+            for line in f:
+                if 'CRITICAL' in line:
+                    lines.append( line.rstrip() )
+    except (IOError, OSError):
+        pass
+    return lines
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
+def tally_log_noise( log_path ):
+    '''Count non-fatal WARNING/ERROR-ish lines in a per-age log - in
+    practice almost always raw GMT stderr text, which (per repeated
+    observation) is frequently emitted for conditions that are not
+    fatal to the run.  This is explicitly NOT the failure signal (that
+    is the exit code + expected-output check in process_age()); it is
+    purely informational, to make it easy to see which ages produced
+    GMT chatter without having to open every single log file.  Lines
+    already counted as CRITICAL are excluded so the two tallies never
+    double up on the same root cause.'''
+    warnings = errors = 0
+    try:
+        with open( log_path ) as f:
+            for line in f:
+                if 'CRITICAL' in line:
+                    continue
+                low = line.lower()
+                if 'warning' in low:
+                    warnings += 1
+                elif 'error' in low:
+                    errors += 1
+    except (IOError, OSError):
+        pass
+    return warnings, errors
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
 def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
                   critical_log_path, log_lock ):
     '''Build the history files for a single age.  Returns a dict
@@ -160,14 +215,24 @@ def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
             proc = subprocess.run( cmd, cwd=age_dir, stdout=log_file,
                                     stderr=subprocess.STDOUT )
 
+        warnings, errors = tally_log_noise( log_path )
+        result['warnings'] = warnings
+        result['errors'] = errors
+
         if proc.returncode != 0:
+            critical_lines = extract_critical_lines( log_path )
+            reason = '; '.join( critical_lines ) if critical_lines else \
+                      'no CRITICAL message found in log - inspect it directly'
             result['status'] = 'failed'
-            result['detail'] = 'make_history_for_age.py exited with code %d (see %s)' % \
-                                (proc.returncode, log_path)
+            result['detail'] = 'make_history_for_age.py exited with code %d: %s (full log: %s)' % \
+                                (proc.returncode, reason, log_path)
         elif not expected_outputs_present( control_d, age, is_ic ):
+            critical_lines = extract_critical_lines( log_path )
+            reason = '; '.join( critical_lines ) if critical_lines else \
+                      'no CRITICAL message found in log either - exited 0 but wrote nothing usable'
             result['status'] = 'failed'
-            result['detail'] = 'exited cleanly but expected output file(s) are missing ' \
-                                '(see %s)' % log_path
+            result['detail'] = 'exited cleanly but expected output file(s) are missing: %s ' \
+                                '(full log: %s)' % (reason, log_path)
         else:
             if verbose: print( now(), 'age %s: done' % age )
 
@@ -186,13 +251,40 @@ def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
 #====================================================================
 #====================================================================
 #====================================================================
-def report_summary( results, critical_log_path ):
+def write_warnings_summary( results, warnings_log_path ):
+    '''Write the non-fatal GMT WARNING/ERROR tally to its own file.
+    Returns the number of ages that logged any such text.  This is
+    purely informational - it is not evidence of a real failure, which
+    is tracked separately in critical_errors.log.'''
+
+    noisy = [ r for r in results if r.get('warnings') or r.get('errors') ]
+    if not noisy:
+        return 0
+
+    with open( warnings_log_path, 'w' ) as f:
+        f.write( '# informational only - NOT failures. GMT routinely prints\n' )
+        f.write( '# WARNING/ERROR text for conditions that are not fatal. Real\n' )
+        f.write( '# failures are reported separately in %s\n' % CRITICAL_LOG_FILENAME )
+        f.write( '#\n' )
+        f.write( '# age  warning_lines  error_lines\n' )
+        for r in sorted( noisy, key=lambda r: r['age'], reverse=True ):
+            f.write( '%s  %d  %d\n' % (r['age'], r.get('warnings',0), r.get('errors',0)) )
+
+    return len(noisy)
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
+def report_summary( results, critical_log_path, warnings_log_path ):
     '''Print, and return the process exit status for, a final summary
     of every requested age once all processing has finished.'''
 
     ok = [ r for r in results if r['status'] == 'ok' ]
     skipped = [ r for r in results if r['status'] == 'skipped' ]
     failed = [ r for r in results if r['status'] == 'failed' ]
+
+    noisy_count = write_warnings_summary( results, warnings_log_path )
 
     print( now(), '=' * 70 )
     print( now(), 'Create_History.py: run summary' )
@@ -204,10 +296,45 @@ def report_summary( results, critical_log_path ):
     if failed:
         failed_ages = sorted( (r['age'] for r in failed), reverse=True )
         print( now(), '  failed ages:', failed_ages )
-        print( now(), '  see', critical_log_path, 'for details of each failure' )
+        print( now(), '  see', critical_log_path, 'for the reason each one failed' )
+
+    if noisy_count:
+        print( now(), '  note: %d age(s) logged non-fatal GMT WARNING/ERROR text '
+                       '(informational only) - see %s' % (noisy_count, warnings_log_path) )
     print( now(), '=' * 70 )
 
     return 1 if failed else 0
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
+def preflight_check( control_d, cwd ):
+    '''Validate the handful of things that, if wrong, would otherwise
+    make every single worker fail identically (e.g. a bad pid_file
+    path) - catch that once, up front, with one clear message, instead
+    of burning a parallel run on N copies of the same root cause.'''
+
+    problems = []
+
+    defaults_conf = os.path.join( cwd, 'geodynamic_framework_defaults.conf' )
+    if not os.path.isfile( defaults_conf ):
+        problems.append( "missing %s (generate it with: Create_History.py -d)" % defaults_conf )
+
+    pid_file = control_d.get('pid_file')
+    if not pid_file:
+        problems.append( "'pid_file' is not set in the configuration file" )
+    elif not os.path.isfile( pid_file ):
+        problems.append( "pid_file not found: %s" % pid_file )
+
+    coord_dir = control_d.get('coord_dir')
+    if coord_dir and not os.path.isdir( coord_dir ):
+        problems.append( "coord_dir not found: %s" % coord_dir )
+
+    if not control_d.get('model_name'):
+        problems.append( "'model_name' is not set in the configuration file" )
+
+    return problems
 #end function
 
 #====================================================================
@@ -246,13 +373,30 @@ def main():
 
     job = control_d['job']
 
+    # fail fast with one clear message rather than letting every
+    # worker discover (and separately report) the same broken config
+    problems = preflight_check( control_d, os.getcwd() )
+    if problems:
+        print( now(), 'CRITICAL: pre-flight check failed - fix the following before running:' )
+        for p in problems:
+            print( now(), ' -', p )
+        sys.exit(1)
+
     # smp and serial branch
     if (job=='smp'):
         serial = control_d['serial']
         cwd = os.getcwd()
         critical_log_path = os.path.join( cwd, CRITICAL_LOG_FILENAME )
+        warnings_log_path = os.path.join( cwd, WARNINGS_LOG_FILENAME )
         log_lock = Lock()
         results = []
+
+        def report_progress():
+            done = len( results )
+            failed_so_far = sum( 1 for r in results if r['status'] == 'failed' )
+            print( now(), 'progress: %d/%d ages done, %d failed so far' %
+                   (done, len(age_loop), failed_so_far) )
+        #end function
 
         if(serial):
             for age in age_loop:
@@ -260,6 +404,7 @@ def main():
                 results.append( process_age( config_path, cwd, age, is_ic,
                                  control_d, overwrite_existing,
                                  critical_log_path, log_lock ) )
+                report_progress()
             #end for
         else:
             cpuCount = control_d['nproc'];
@@ -283,10 +428,11 @@ def main():
                 ]
                 for future in as_completed( futures ):
                     results.append( future.result() )
+                    report_progress()
             #end with
         #end if
 
-        sys.exit( report_summary( results, critical_log_path ) )
+        sys.exit( report_summary( results, critical_log_path, warnings_log_path ) )
     # parallel branch
     else:
 
@@ -626,6 +772,18 @@ VERBOSE = True ; show terminal output
 # earlier ages to fail. if True (default), every requested age is
 # always (re)computed, matching the original script behaviour.
 OVERWRITE_EXISTING = True
+
+# GMT's own internal (OpenMP) multithreading per GMT call. Ages are
+# normally already processed with many ages in parallel (see 'nproc'
+# above), so left unconstrained, each worker's GMT calls would also
+# multithread internally and oversubscribe the available CPUs.
+# default (1) pins each GMT call to a single thread, which is usually
+# faster under heavy outer parallelism (nproc > 1). Set to -1 to leave
+# GMT's own default threading unconstrained (e.g. for serial / small
+# nproc runs where individual GMT calls dominate runtime), or to a
+# specific integer to tune manually. If this slows preprocessing down
+# for your job, try -1 first.
+GMT_NUM_THREADS = 1
 
 # do not remove processed age and final temperature grids
 KEEP_GRIDS = True

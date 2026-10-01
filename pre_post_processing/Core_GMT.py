@@ -12,7 +12,7 @@
 '''Core_GMT6.py provides a generalized interface to the various GMT6 programs, as well as a few specialized plotting functions '''
 #=====================================================================
 #=====================================================================
-import os, sys, subprocess
+import logging, os, sys, subprocess
 import numpy as np
 import Core_Util
 
@@ -86,10 +86,25 @@ out : the output file name.
 
     # create one string
     cmd = ' '.join(cmd_list)
-    if verbose: print( Core_Util.now(), cmd )
+    # logged at DEBUG so it is available for deep troubleshooting
+    # (enable with VERBOSE = True in the .cfg) without flooding the
+    # log by default - this is typically the single highest-volume
+    # line in a run since it is emitted once per GMT call
+    logging.debug( cmd )
 
-    # capture output (returned as bytes)
-    p = subprocess.check_output( cmd, shell=True )
+    # capture output (returned as bytes); stderr is left to propagate
+    # to the caller's stderr (typically redirected to a per-age log
+    # file upstream) so GMT's own WARNING/ERROR text remains visible
+    try:
+        p = subprocess.check_output( cmd, shell=True )
+    except subprocess.CalledProcessError as e:
+        # a raw, unhandled CalledProcessError here would dump a
+        # multi-frame Python traceback into the log; report the
+        # actual failing command cleanly instead, tagged CRITICAL so
+        # it is trivially greppable and distinguishable from GMT's
+        # own (frequently non-fatal) WARNING/ERROR chatter
+        logging.critical( 'GMT command failed (exit code %d): %s' % (e.returncode, cmd) )
+        sys.exit(1)
 
     # convert bytes output to string and remove
     # newline character

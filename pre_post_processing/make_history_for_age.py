@@ -217,6 +217,19 @@ def basic_setup(cfg_filename, age, IC):
 
     set_verbose( control_d )
 
+    # pin GMT's own internal (OpenMP) multithreading per call. This
+    # matters because age processing is typically already run with
+    # many ages in parallel (Create_History.py 'nproc'); without this,
+    # each of those workers' GMT calls would also try to multithread
+    # internally, oversubscribing the available CPUs. Default of 1 is
+    # usually fastest under that outer parallelism; set to -1 in the
+    # .cfg to leave GMT's own default threading unconstrained (e.g.
+    # for serial / low-nproc runs where individual GMT calls are the
+    # bottleneck), or to a specific integer to tune manually.
+    gmt_num_threads = control_d.get( 'GMT_NUM_THREADS', 1 )
+    if gmt_num_threads != -1:
+        os.environ['GMT_NUM_THREADS'] = str( gmt_num_threads )
+
     master['control_d'] = control_d
 
     # update with parameters from geodynamic framework
@@ -537,8 +550,7 @@ def include_weak_interface( master,master_grids,master_node_points, kk):
             
             if polarity != 'R' and polarity != 'L':
                 errorline = line.rstrip('\n')
-                print( now(), errorline )
-                print( now(), 'ERROR: cannot determine subduction zone polarity' )
+                logging.critical( 'cannot determine subduction zone polarity: %s' % errorline )
                 sys.exit(1)
 
             dist = Core_Util.get_slab_center_dist( depth_km, start_depth, slab_dip, roc,
@@ -900,13 +912,11 @@ def check_input_parameters( master_d ):
 
     # temperature and lower thermal boundary layer error handling
     if temperature_mantle > temperature_cmb:
-        err = 'ERROR: temperature_mantle > temperature_cmb'
-        logging.critical( err )
-        exit(1)
+        logging.critical( 'temperature_mantle > temperature_cmb' )
+        sys.exit(1)
     elif temperature_mantle == temperature_cmb and BUILD_LTBL:
-        err = 'ERROR: BUILD_LTBL but temperature_mantle = temperature_cmb!'
-        logging.critical( err )
-        exit(1)
+        logging.critical( 'BUILD_LTBL but temperature_mantle = temperature_cmb!' )
+        sys.exit(1)
 
     # force some directories to be local otherwise files are
     # modified and removed by other instances of the code
@@ -985,7 +995,7 @@ def check_input_parameters( master_d ):
                 velo_name += 'gplates_%(comp)s.0.%(age)s.grd' % vars()
                 # ensure that file exists
                 if not os.path.exists( velo_name ):
-                    print( now(), 'ERROR: cannot find file: %(velo_name)s' % vars() )
+                    logging.critical( 'cannot find file: %(velo_name)s' % vars() )
                     sys.exit(1)
                 grid_names.append( velo_name )
 
@@ -1003,16 +1013,17 @@ def check_input_parameters( master_d ):
         nodey = pid_d['mgunity'] * int(math.pow(2,pid_d['levels']-1)) * pid_d['nprocy'] + 1
         nodez = pid_d['mgunitz'] * int(math.pow(2,pid_d['levels']-1)) * pid_d['nprocz'] + 1
         if nodex != pid_d['nodex'] or nodey != pid_d['nodey'] or nodez != pid_d['nodez']:
-            logging.error('The equations ')
-            logging.error('nodex = 1 + nprocx + mgunitx + 2**(levels-1)')
-            logging.error('nodey = 1 + nprocy + mgunity + 2**(levels-1)')
-            logging.error('nodez = 1 + nprocz + mgunitz + 2**(levels-1)')
-            logging.error('must be satisfied!')
+            logging.critical('The equations ')
+            logging.critical('nodex = 1 + nprocx + mgunitx + 2**(levels-1)')
+            logging.critical('nodey = 1 + nprocy + mgunity + 2**(levels-1)')
+            logging.critical('nodez = 1 + nprocz + mgunitz + 2**(levels-1)')
+            logging.critical('must be satisfied!')
             sys.exit(1)
 
     if 'tracers_per_element' in control_d:
-        logging.error(f"the tracers_per_element parameter should be moved into {control_d['pid_file']}.")
-        sys.exit(' - XXXX - preprocessing failed due to unexpected parameter in control file!')
+        logging.critical(f"preprocessing failed due to unexpected parameter in control file: "
+                          f"the tracers_per_element parameter should be moved into {control_d['pid_file']}.")
+        sys.exit(1)
 #=====================================================================
 #=====================================================================
 #=====================================================================
@@ -1564,7 +1575,7 @@ def include_blob( master, master_grids, master_node_points, kk ):
            (len(blob_center_lon) != len(blob_birth_age)) or \
            (len(blob_center_lon) != len(blob_dT)) or \
            (len(blob_center_lon) != len(blob_profile))):
-            print( now(), 'ERROR: inconsistent parameterization for Blobs' )
+            logging.critical( 'inconsistent parameterization for Blobs' )
             sys.exit(1)
         #end if
         blob_center_lon = [float(i) for i in blob_center_lon]
@@ -1584,8 +1595,8 @@ def include_blob( master, master_grids, master_node_points, kk ):
     blob_birth_age_set = set(blob_birth_age)
 
     if(not (blob_birth_age_set.issubset(age_loop_set))):
-        print( now(), '''ERROR: inconsistent parameterization for Blobs. Blob birth 
-                       ages are outside the age-range [age_start, age_end].''' )
+        logging.critical( 'inconsistent parameterization for Blobs. Blob birth '
+                           'ages are outside the age-range [age_start, age_end].' )
         sys.exit(1)
     #end if
 
@@ -1754,7 +1765,7 @@ def include_silo( master, master_grids, master_node_points, kk ):
            (len(silo_base_center_lon) != len(silo_birth_age)) or \
            (len(silo_base_center_lon) != len(silo_dT)) or \
            (len(silo_base_center_lon) != len(silo_profile))):
-            print( now(), 'ERROR: inconsistent parameterization for Silos' )
+            logging.critical( 'inconsistent parameterization for Silos' )
             sys.exit(1)
         #end if
         silo_base_center_lon = [float(i) for i in silo_base_center_lon]
@@ -1779,8 +1790,8 @@ def include_silo( master, master_grids, master_node_points, kk ):
     silo_birth_age_set = set(silo_birth_age_filtered)
 
     if((len(silo_birth_age_set)>0) and (not (silo_birth_age_set.issubset(age_loop_set)))):
-        print( now(), '''ERROR: inconsistent parameterization for Silos. Silo birth 
-                       ages are outside the age-range [age_start, age_end].''' )
+        logging.critical( 'inconsistent parameterization for Silos. Silo birth '
+                           'ages are outside the age-range [age_start, age_end].' )
         sys.exit(1)
     #end if
     
@@ -2763,7 +2774,7 @@ def set_global_defaults( arg, pid_d ):
                                     lat_min-grd_res, lat_max+grd_res)
 
     else:
-        print( now(), 'ERROR: nproc_surf must be 1 or 12 in the pid file' )
+        logging.critical( 'nproc_surf must be 1 or 12 in the pid file' )
         sys.exit(1)
 
     # by default, export data to CitcomS, but maybe this will
@@ -3399,7 +3410,7 @@ def make_synthetic_subduction_file( master ):
         fi_trench -= (rollback_start_age-age)*rollback_vel
 
     if (fi_trench < fi_min) or (fi_trench > fi_max):
-        print( now(), 'ERROR: fi_trench (%f) out of bounds' % fi_trench)
+        logging.critical( 'fi_trench (%f) out of bounds' % fi_trench)
         sys.exit(1)
     lon_trench = np.degrees( fi_trench )
     control_d['lon_trench'] = lon_trench # needed for age grids
@@ -3555,12 +3566,25 @@ def set_verbose( control_d ):
     '''Set verbose for this script and all Core modules that
        are imported.'''
 
-    verbose_list = [Core_Citcom.verbose,
-                    Core_GMT.verbose, Core_Util.verbose, verbose]
+    # NOTE: this used to loop over [Core_Citcom.verbose, Core_GMT.verbose,
+    # Core_Util.verbose, verbose] and rebind the loop variable, which is a
+    # no-op in Python - none of the module-level 'verbose' flags were ever
+    # actually changed, so e.g. Core_GMT.verbose stayed at its hardcoded
+    # default (True) regardless of VERBOSE in the .cfg, and every GMT
+    # command was echoed to the log unconditionally. Assign each module
+    # attribute directly instead.
 
-    if control_d['VERBOSE']: val = True
-    else: val = False
-    for entry in verbose_list: entry = val
+    val = bool( control_d['VERBOSE'] )
+
+    global verbose
+    verbose = val
+    Core_Citcom.verbose = val
+    Core_GMT.verbose = val
+    Core_Util.verbose = val
+
+    # also drive the standard logging level, since GMT command echoing
+    # (Core_GMT.callgmt) and other diagnostics are logged at DEBUG
+    logging.getLogger().setLevel( logging.DEBUG if val else logging.INFO )
 
 #=====================================================================
 #=====================================================================
@@ -3637,8 +3661,8 @@ def isSerial(control_d):
     elif (control_d['job']=='baloo'):
         result = False;
     else:
-        print ("Illegal option for 'job', check config file. Aborting..")
-        sys.exit(0)
+        logging.critical( "illegal option for 'job', check config file. Aborting.." )
+        sys.exit(1)
     #end if
 
     return result
