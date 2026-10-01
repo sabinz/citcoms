@@ -2384,12 +2384,12 @@ def output_tracer( master_d ):
     tracers_per_element = pid_d['tracers_per_element']
 
     num = nodex*nodey*nodez*nproc_surf*tracers_per_element
-    txt = 'tracers_per_element= %(tracers_per_element)s' % vars()
-    if verbose: print( now(), txt )
-    txt = 'total number of tracers= %(num)s' % vars()
-    if verbose: print( now(), txt )
+    logging.info( 'output_tracer: tracers_per_element=%s, total tracers to generate=%s' %
+                  (tracers_per_element, num) )
 
+    logging.info( 'output_tracer: generating tracer positions...' )
     r, theta, phi = Core_Util.generate_random_tracers( num )
+    logging.info( 'output_tracer: tracer positions generated' )
 
     # remove tracers
     if NO_TRACER_REGION:
@@ -2421,12 +2421,13 @@ def output_tracer( master_d ):
         lon = np.degrees( phi )
         lat = 90 - np.degrees( theta )
         out_data = np.column_stack( (lon, lat) )
-        txt = 'writing file= %(filename)s' % vars()
-        if verbose: print( now(), txt )
+        logging.info( 'output_tracer: writing %d tracer coordinates to %s...' % (num, filename) )
         np.savetxt( filename, out_data, fmt='%.2f' )
+        logging.info( 'output_tracer: tracer coordinates written' )
 
         # set no assimilation regions (if present)
         # to NaN
+        logging.info( 'output_tracer: building no-assimilation stencil grid...' )
         make_stencil_grid_to_build_tracers( master_d )
         afile_4 = control_d['afile_4']
 
@@ -2434,7 +2435,10 @@ def output_tracer( master_d ):
         cmd = filename + ' -G' + afile_4
         track_file = '%(trac_dir)s/output_tracer_track.xyz' % vars()
         rm_list.append( track_file )
+        logging.info( 'output_tracer: sampling continental types for %d tracers via GMT '
+                      '(this can take a while for large tracer counts)...' % num )
         callgmt( 'grdtrack', cmd,  '', '>', track_file )
+        logging.info( 'output_tracer: continental-type sampling complete' )
         # grdtrack command produces negative non-integer values at
         # the edge of continental types due to interpolation
         sv = np.loadtxt( track_file, usecols=(2,), unpack=True )
@@ -2514,15 +2518,17 @@ def output_tracer( master_d ):
     # write out to single file
     make_dir( trac_dir )
     filename =  '%(trac_dir)s/%(model_name)s.tracer.%(age)sMa' % vars()
-    txt = 'writing tracer file= %(filename)s' % vars()
-    if verbose: print( now(), txt )
+    logging.info( 'output_tracer: writing %d tracers to %s...' % (num, filename) )
     head = '%(num)s 4' % vars()
     format = '%.6f %.6f %.6f %d'
     out_data = np.column_stack( (theta,phi,r,flavor) )
     np.savetxt( filename, out_data, header=head, fmt=format, comments='' )
+    logging.info( 'output_tracer: tracer file written' )
 
     if PLOT_SUMMARY_POSTSCRIPT:
+        logging.info( 'output_tracer: generating tracer summary postscript...' )
         make_tracer_summary_postscript( master_d )
+        logging.info( 'output_tracer: tracer summary postscript complete' )
 
     # XXX DJB - for testing efficiency
     t1 = time.time() # end time

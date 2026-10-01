@@ -26,7 +26,7 @@ import Core_Util
 from Core_Util import now
 from subprocess import PIPE, Popen
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from threading import Lock, Thread
 from make_history_for_age import basic_setup, isSerial
 #=====================================================================
 verbose = True
@@ -124,6 +124,15 @@ def expected_outputs_present( control_d, age, is_ic ):
         return False
 
     return all( checks )
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
+def format_duration( seconds ):
+    '''Human-readable H:MM:SS (or D days, H:MM:SS) rendering of a
+    duration in seconds, used for both per-age and whole-run timing.'''
+    return str( datetime.timedelta( seconds=int( seconds ) ) )
 #end function
 
 #====================================================================
@@ -258,10 +267,12 @@ def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
 
     age_dir = os.path.join( cwd, str(age) )
     result = { 'age': age, 'status': 'ok', 'detail': '' }
+    t0 = time.time()
 
     try:
         if (not overwrite) and expected_outputs_present( control_d, age, is_ic ):
             result['status'] = 'skipped'
+            result['duration'] = time.time() - t0
             if verbose: print( now(), 'age %s: outputs already present, skipping' % age )
             return result
 
@@ -292,16 +303,21 @@ def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
             result['detail'] = 'exited cleanly but expected output file(s) are missing: %s ' \
                                 '(full log: %s)' % (reason, log_path)
         else:
-            if verbose: print( now(), 'age %s: done' % age )
+            if verbose: print( now(), 'age %s: done (%s)' %
+                               (age, format_duration( time.time() - t0 )) )
 
     except Exception:
         result['status'] = 'failed'
         result['detail'] = 'unhandled exception while processing age %s:\n%s' % \
                             (age, traceback.format_exc())
 
+    result['duration'] = time.time() - t0
+
     if result['status'] == 'failed':
-        print( now(), 'age %s: CRITICAL FAILURE - %s' % (age, result['detail']) )
-        log_critical( critical_log_path, log_lock, 'age %s FAILED: %s' % (age, result['detail']) )
+        print( now(), 'age %s: CRITICAL FAILURE after %s - %s' %
+               (age, format_duration( result['duration'] ), result['detail']) )
+        log_critical( critical_log_path, log_lock, 'age %s FAILED after %s: %s' %
+                      (age, format_duration( result['duration'] ), result['detail']) )
 
     return result
 #end function
@@ -334,7 +350,8 @@ def write_warnings_summary( results, warnings_log_path ):
 #====================================================================
 #====================================================================
 #====================================================================
-def report_summary( results, critical_log_path, warnings_log_path ):
+def report_summary( results, critical_log_path, warnings_log_path,
+                     run_start_dt, run_end_dt ):
     '''Print, and return the process exit status for, a final summary
     of every requested age once all processing has finished.'''
 
@@ -346,10 +363,27 @@ def report_summary( results, critical_log_path, warnings_log_path ):
 
     print( now(), '=' * 70 )
     print( now(), 'Create_History.py: run summary' )
+    print( now(), '  run started : %s' % run_start_dt.strftime( '%Y-%m-%d %H:%M:%S' ) )
+    print( now(), '  run ended   : %s' % run_end_dt.strftime( '%Y-%m-%d %H:%M:%S' ) )
+    print( now(), '  run duration: %s' % format_duration( (run_end_dt - run_start_dt).total_seconds() ) )
     print( now(), '  requested : %d' % len(results) )
     print( now(), '  succeeded : %d' % len(ok) )
     print( now(), '  skipped   : %d (already had valid output)' % len(skipped) )
     print( now(), '  FAILED    : %d' % len(failed) )
+
+    # ages actually processed (not skipped) have a real 'duration' -
+    # surface the slowest ones, since an unusually slow age can itself
+    # be a useful signal even when it didn't outright fail
+    timed = [ r for r in results if r['status'] != 'skipped' and r.get('duration') is not None ]
+    if timed:
+        slowest = sorted( timed, key=lambda r: r['duration'], reverse=True )[:5]
+        avg = sum( r['duration'] for r in timed ) / len(timed)
+        print( now(), '  average time per age: %s' % format_duration( avg ) )
+        print( now(), '  slowest ages:' )
+        for r in slowest:
+            print( now(), '    age %s: %s%s' % (
+                r['age'], format_duration( r['duration'] ),
+                ' (FAILED)' if r['status'] == 'failed' else '' ) )
 
     if failed:
         failed_ages = sorted( (r['age'] for r in failed), reverse=True )
@@ -456,6 +490,8 @@ def main():
         # so fall back to the plain one-line-per-age form there
         use_bar = sys.stdout.isatty()
         start_time = time.time()
+        run_start_dt = datetime.datetime.now()
+        print( now(), 'run started: %s' % run_start_dt.strftime( '%Y-%m-%d %H:%M:%S' ) )
         bar_dirty = [False] # mutable cell so the nested functions can flip it
 
         # process_age()'s own per-age 'starting'/'done' lines are
@@ -500,7 +536,7 @@ def main():
             if 0 < done < total:
                 elapsed = time.time() - start_time
                 remaining = elapsed / done * (total-done)
-                eta = ' | ETA %s' % str( datetime.timedelta( seconds=int(remaining) ) )
+                eta = ' | ETA %s' % format_duration( remaining )
 
             line = '\r[%s] %d/%d (%3d%%) | %d failed%s' % \
                    (bar, done, total, int(frac*100), failed_so_far, eta)
@@ -524,10 +560,34 @@ def main():
         # of a broken initial condition.
         remaining_ages = age_loop
         if oldest_age is not None:
+            ic_log_path = os.path.join( cwd, str(oldest_age), 'make_history.log' )
             print( now(), 'processing initial-condition age %s on its own first...' % oldest_age )
-            ic_result = process_age( config_path, cwd, oldest_age, True,
-                                      control_d, overwrite_existing,
-                                      critical_log_path, log_lock )
+            print( now(), 'this is typically the slowest single age (tracer generation can be '
+                           'memory- and time-intensive) - progress detail: %s' % ic_log_path )
+
+            # this is the one place the whole run blocks on a single
+            # synchronous call, potentially for a long time - run it in
+            # a background thread so the main thread can print periodic
+            # heartbeats instead of going silent until it finishes
+            ic_outcome = {}
+            def run_ic_age():
+                ic_outcome['result'] = process_age( config_path, cwd, oldest_age, True,
+                                                      control_d, overwrite_existing,
+                                                      critical_log_path, log_lock )
+            #end function
+            ic_thread = Thread( target=run_ic_age )
+            ic_start = time.time()
+            ic_thread.start()
+
+            heartbeat_interval = 30 # seconds
+            while ic_thread.is_alive():
+                ic_thread.join( timeout=heartbeat_interval )
+                if ic_thread.is_alive():
+                    print( now(), 'still processing initial-condition age %s... (%s elapsed)' %
+                           (oldest_age, format_duration( time.time() - ic_start )) )
+            #end while
+
+            ic_result = ic_outcome['result']
             results.append( ic_result )
             report_progress()
 
@@ -538,7 +598,8 @@ def main():
                                'rest of this run.' % oldest_age )
                 print( now(), 'CRITICAL:', ic_result['detail'] )
                 print( now(), '=' * 70 )
-                sys.exit( report_summary( results, critical_log_path, warnings_log_path ) )
+                sys.exit( report_summary( results, critical_log_path, warnings_log_path,
+                                           run_start_dt, datetime.datetime.now() ) )
             #end if
 
             remaining_ages = age_loop[1:]
@@ -577,7 +638,8 @@ def main():
         #end if
 
         end_progress_line()
-        sys.exit( report_summary( results, critical_log_path, warnings_log_path ) )
+        sys.exit( report_summary( results, critical_log_path, warnings_log_path,
+                                   run_start_dt, datetime.datetime.now() ) )
     # parallel branch
     else:
 
