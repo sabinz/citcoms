@@ -159,6 +159,44 @@ def extract_critical_lines( log_path ):
 #====================================================================
 #====================================================================
 #====================================================================
+def extract_traceback_blocks( log_path ):
+    '''Pull out raw Python traceback blocks (unhandled exceptions,
+    e.g. a KeyError from a missing config key) from a per-age log.
+    These never go through logging.critical() - they're Python's own
+    default crash output - so extract_critical_lines() alone misses
+    them entirely, silently hiding the actual error behind a generic
+    "exited with code 1, no CRITICAL message found" line.'''
+    blocks = []
+    try:
+        with open( log_path ) as f:
+            lines = [ line.rstrip('\n') for line in f ]
+    except (IOError, OSError):
+        return blocks
+
+    ii, n = 0, len(lines)
+    while ii < n:
+        if lines[ii] == 'Traceback (most recent call last):':
+            block = [ lines[ii] ]
+            jj = ii + 1
+            while jj < n:
+                line = lines[jj]
+                block.append( line )
+                jj += 1
+                # a traceback block ends at the first line that is not
+                # indented - that line is the 'ExceptionType: message'
+                # summary, and is itself part of the block
+                if line and not line[0].isspace():
+                    break
+            blocks.append( block )
+            ii = jj
+        else:
+            ii += 1
+    return blocks
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
 def tally_log_noise( log_path ):
     '''Count non-fatal WARNING/ERROR-ish lines in a per-age log - in
     practice almost always raw GMT stderr text, which (per repeated
@@ -183,6 +221,30 @@ def tally_log_noise( log_path ):
     except (IOError, OSError):
         pass
     return warnings, errors
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
+def summarize_failure_from_log( log_path ):
+    '''Build a human-readable summary of why an age failed, pulling in
+    both logging.critical() lines and raw Python tracebacks - the two
+    kinds of fatal signal a per-age log can contain. This is what
+    actually ends up inline in critical_errors.log, so the reason is
+    visible there directly instead of requiring a trip into the age's
+    own log folder.'''
+    critical_lines = extract_critical_lines( log_path )
+    traceback_blocks = extract_traceback_blocks( log_path )
+
+    parts = []
+    if critical_lines:
+        parts.append( '; '.join( critical_lines ) )
+    for block in traceback_blocks:
+        parts.append( '\n'.join( block ) )
+
+    if not parts:
+        return 'no CRITICAL message or traceback found in log - inspect it directly'
+    return ' | '.join( parts )
 #end function
 
 #====================================================================
@@ -220,16 +282,12 @@ def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
         result['errors'] = errors
 
         if proc.returncode != 0:
-            critical_lines = extract_critical_lines( log_path )
-            reason = '; '.join( critical_lines ) if critical_lines else \
-                      'no CRITICAL message found in log - inspect it directly'
+            reason = summarize_failure_from_log( log_path )
             result['status'] = 'failed'
             result['detail'] = 'make_history_for_age.py exited with code %d: %s (full log: %s)' % \
                                 (proc.returncode, reason, log_path)
         elif not expected_outputs_present( control_d, age, is_ic ):
-            critical_lines = extract_critical_lines( log_path )
-            reason = '; '.join( critical_lines ) if critical_lines else \
-                      'no CRITICAL message found in log either - exited 0 but wrote nothing usable'
+            reason = summarize_failure_from_log( log_path )
             result['status'] = 'failed'
             result['detail'] = 'exited cleanly but expected output file(s) are missing: %s ' \
                                 '(full log: %s)' % (reason, log_path)
