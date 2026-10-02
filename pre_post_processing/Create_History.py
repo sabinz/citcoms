@@ -462,10 +462,24 @@ def main():
     # read job settings
     control_d['serial'] = isSerial(control_d)
 
-    age_start = max( control_d['age_start'], control_d['age_end'] )
-    age_end = min( control_d['age_end'], control_d['age_start'] )
-    age_loop = list( range( age_end, age_start+1 ) )
-    age_loop.reverse()
+    # Andres - This update allows processing an arbitrary list of ages in the configuration file.
+    if 'age_list' in control_d:
+        raw_age_list = control_d['age_list']
+
+        if isinstance(raw_age_list, (list, tuple)):
+            age_loop = [int(a) for a in raw_age_list]
+        else:
+            raw_age_list = str(raw_age_list)
+            raw_age_list = raw_age_list.replace('[', '').replace(']', '')
+            age_loop = [int(a.strip()) for a in raw_age_list.split(',') if a.strip()]
+
+        if not age_loop:
+            raise ValueError('age_list must contain at least one integer age')
+    else:
+        age_start = max( control_d['age_start'], control_d['age_end'] )
+        age_end = min( control_d['age_end'], control_d['age_start'] )
+        age_loop = list( range( age_end, age_start+1 ) )
+        age_loop.reverse()
 
     # the oldest requested age is the one and only age that requires an
     # initial condition; this mirrors the original 'IC' flag which was
