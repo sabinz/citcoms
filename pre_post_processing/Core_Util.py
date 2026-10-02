@@ -1804,7 +1804,13 @@ def make_slab_temperature_xyz( master, kk ):
             # temperature_mantle-temperature_min is temperature drop
             
             #dT = (temperature_mantle-temperature_min) / (2*np.sin( slab_dip )) - It results in slab break-off after re-start - Original before weak subduction interface
-            dT = float(control_d['SLAB_STRENGTH_FACTOR']) * (temperature_mantle-temperature_min) / (2*np.sin( slab_dip )) #Andres - Make that slab colder - Works very good to prevent slab break-off
+            #Andres - Make that slab colder - Works very good to prevent slab break-off
+            if control_d['BUILD_WEAK_INTERFACE'] == True:
+                print("Using Stronger slab workflow (Colder slab thermal structure)")
+                dT = float(control_d['SLAB_STRENGTH_FACTOR']) * (temperature_mantle-temperature_min) / (2*np.sin( slab_dip ))
+            else:
+                print("Weak interface disabled - Using Default slab thermal structure ")
+                dT = (temperature_mantle-temperature_min) / (2*np.sin( slab_dip ))
 
             sten_depth, sten_smooth = \
                 get_stencil_depth_and_smooth( control_d, slab_depth )
