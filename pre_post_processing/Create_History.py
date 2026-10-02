@@ -26,7 +26,7 @@ import Core_Util
 from Core_Util import now
 from subprocess import PIPE, Popen
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock, Thread
+from threading import Lock, Thread, Event
 from make_history_for_age import basic_setup, isSerial
 #=====================================================================
 verbose = True
@@ -155,6 +155,58 @@ def tail_log_line( log_path ):
 #====================================================================
 #====================================================================
 #====================================================================
+def print_status_block( in_flight, progress_lock, results, total, start_time ):
+    '''Print one snapshot of overall progress plus, for every age
+    currently in flight, its elapsed time and latest log line (e.g.
+    'znode 32/65', 'track_grids_to_cap_list: grid 23/63') - so a long
+    run shows not just how many ages are done, but what each of the
+    currently-running ones is actually doing right now.'''
+
+    done = len( results )
+    failed_so_far = sum( 1 for r in results if r['status'] == 'failed' )
+    elapsed = time.time() - start_time
+
+    eta = ''
+    if 0 < done < total:
+        remaining = elapsed / done * (total-done)
+        eta = ' | ETA %s' % format_duration( remaining )
+
+    pct = int( 100*done/total ) if total else 100
+
+    with progress_lock:
+        snapshot = sorted( in_flight.items() )
+
+    print( now(), '-' * 70 )
+    print( now(), 'progress: %d/%d done (%d%%) | %d failed%s' %
+           (done, total, pct, failed_so_far, eta) )
+    if snapshot:
+        print( now(), 'currently processing %d age(s):' % len(snapshot) )
+        for age, (age_start, log_path) in snapshot:
+            last_line = tail_log_line( log_path )
+            print( now(), '  age %s (%s elapsed): %s' % (
+                age, format_duration( time.time() - age_start ),
+                last_line if last_line else 'starting...' ) )
+    print( now(), '-' * 70 )
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
+def status_reporter_loop( in_flight, progress_lock, results, total, start_time,
+                           stop_event, interval ):
+    '''Runs in a background thread for the lifetime of the smp run
+    (covering both the solo initial-condition call and the main pool),
+    printing a status snapshot every 'interval' seconds until told to
+    stop. A single mechanism for both phases - whatever age(s) are
+    in 'in_flight' at the time, IC or not, get reported.'''
+    while not stop_event.wait( interval ):
+        print_status_block( in_flight, progress_lock, results, total, start_time )
+    #end while
+#end function
+
+#====================================================================
+#====================================================================
+#====================================================================
 def log_critical( critical_log_path, lock, message ):
     '''Thread-safe append of a timestamped message to the critical log.'''
     with lock:
@@ -277,12 +329,18 @@ def summarize_failure_from_log( log_path ):
 #====================================================================
 #====================================================================
 def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
-                  critical_log_path, log_lock ):
+                  critical_log_path, log_lock, in_flight, progress_lock ):
     '''Build the history files for a single age.  Returns a dict
     describing the outcome; never raises - any problem is captured in
-    the returned dict and in the critical log instead.'''
+    the returned dict and in the critical log instead.
+
+    While the actual subprocess is running, this age is registered in
+    the shared 'in_flight' dict (age -> (start_time, log_path)) so the
+    background status_reporter_loop can report its live progress -
+    removed again once the subprocess finishes, success or not.'''
 
     age_dir = os.path.join( cwd, str(age) )
+    log_path = os.path.join( age_dir, 'make_history.log' )
     result = { 'age': age, 'status': 'ok', 'detail': '' }
     t0 = time.time()
 
@@ -296,14 +354,19 @@ def process_age( config_path, cwd, age, is_ic, control_d, overwrite,
         os.makedirs( age_dir, exist_ok=True )
         shutil.copy( os.path.join( cwd, 'geodynamic_framework_defaults.conf' ), age_dir )
 
-        log_path = os.path.join( age_dir, 'make_history.log' )
         cmd = [ 'make_history_for_age.py', config_path, str(age), str(int(is_ic)) ]
 
         if verbose: print( now(), 'age %s: starting (log: %s)' % (age, log_path) )
 
-        with open( log_path, 'w' ) as log_file:
-            proc = subprocess.run( cmd, cwd=age_dir, stdout=log_file,
-                                    stderr=subprocess.STDOUT )
+        with progress_lock:
+            in_flight[age] = (t0, log_path)
+        try:
+            with open( log_path, 'w' ) as log_file:
+                proc = subprocess.run( cmd, cwd=age_dir, stdout=log_file,
+                                        stderr=subprocess.STDOUT )
+        finally:
+            with progress_lock:
+                in_flight.pop( age, None )
 
         warnings, errors = tally_log_noise( log_path )
         result['warnings'] = warnings
@@ -512,71 +575,33 @@ def main():
         critical_log_path = os.path.join( cwd, CRITICAL_LOG_FILENAME )
         warnings_log_path = os.path.join( cwd, WARNINGS_LOG_FILENAME )
         log_lock = Lock()
+        progress_lock = Lock()
+        in_flight = {} # age -> (start_time, log_path), only while actually running
         results = []
 
-        # a real self-overwriting progress bar only makes sense when
-        # someone is actually watching an interactive terminal; when
-        # stdout is redirected to a log file (the common case for a
-        # cluster job) '\r' just gets written as a literal character,
-        # so fall back to the plain one-line-per-age form there
-        use_bar = sys.stdout.isatty()
         start_time = time.time()
         run_start_dt = datetime.datetime.now()
         print( now(), 'run started: %s' % run_start_dt.strftime( '%Y-%m-%d %H:%M:%S' ) )
-        bar_dirty = [False] # mutable cell so the nested functions can flip it
 
-        # process_age()'s own per-age 'starting'/'done' lines are
-        # gated behind the module-level 'verbose' flag. With worker
-        # threads printing those concurrently and asynchronously
-        # relative to the bar, they'd get glued onto the end of the
-        # bar line instead of starting on a fresh one - the bar itself
-        # already conveys overall progress, so suppress the per-age
-        # chatter while it's active rather than fight it for the
-        # terminal line. Leave it untouched (still the primary signal)
-        # when there's no bar, e.g. output redirected to a log file.
-        global verbose
-        verbose = not use_bar
+        # one background thread reports progress for the whole smp run -
+        # both the solo initial-condition call below and the main pool
+        # after it, since both register themselves in 'in_flight' the
+        # same way. Prints a full snapshot (overall % done, ETA, and
+        # every currently-running age's latest log line) periodically,
+        # so a long run shows what's actually happening instead of
+        # going silent or showing a bare, uninformative bar.
+        total_ages = len( age_loop )
+        status_interval = 20 # seconds
+        stop_status = Event()
+        status_thread = Thread( target=status_reporter_loop,
+                                 args=(in_flight, progress_lock, results, total_ages,
+                                       start_time, stop_status, status_interval) )
+        status_thread.daemon = True
+        status_thread.start()
 
-        def end_progress_line():
-            '''Move off the in-progress bar line before printing
-            anything else (e.g. a CRITICAL banner or the final
-            summary), so that output doesn't get glued onto its end.'''
-            if bar_dirty[0]:
-                sys.stdout.write( '\n' )
-                sys.stdout.flush()
-                bar_dirty[0] = False
-        #end function
-
-        def report_progress():
-            done = len( results )
-            total = len( age_loop )
-            failed_so_far = sum( 1 for r in results if r['status'] == 'failed' )
-
-            if not use_bar:
-                print( now(), 'progress: %d/%d ages done, %d failed so far' %
-                       (done, total, failed_so_far) )
-                return
-            #end if
-
-            frac = done / total if total else 1.0
-            width = 30
-            filled = int( round( frac*width ) )
-            bar = '#'*filled + '-'*(width-filled)
-
-            eta = ''
-            if 0 < done < total:
-                elapsed = time.time() - start_time
-                remaining = elapsed / done * (total-done)
-                eta = ' | ETA %s' % format_duration( remaining )
-
-            line = '\r[%s] %d/%d (%3d%%) | %d failed%s' % \
-                   (bar, done, total, int(frac*100), failed_so_far, eta)
-            sys.stdout.write( line.ljust(100) )
-            sys.stdout.flush()
-            bar_dirty[0] = True
-
-            if done >= total:
-                end_progress_line()
+        def stop_status_reporter():
+            stop_status.set()
+            status_thread.join( timeout=5 )
         #end function
 
         # process the initial-condition age (always the oldest requested
@@ -591,42 +616,17 @@ def main():
         # of a broken initial condition.
         remaining_ages = age_loop
         if oldest_age is not None:
-            ic_log_path = os.path.join( cwd, str(oldest_age), 'make_history.log' )
             print( now(), 'processing initial-condition age %s on its own first...' % oldest_age )
             print( now(), 'this is typically the slowest single age (tracer generation can be '
-                           'memory- and time-intensive) - progress detail: %s' % ic_log_path )
+                           'memory- and time-intensive)' )
 
-            # this is the one place the whole run blocks on a single
-            # synchronous call, potentially for a long time - run it in
-            # a background thread so the main thread can print periodic
-            # heartbeats instead of going silent until it finishes
-            ic_outcome = {}
-            def run_ic_age():
-                ic_outcome['result'] = process_age( config_path, cwd, oldest_age, True,
-                                                      control_d, overwrite_existing,
-                                                      critical_log_path, log_lock )
-            #end function
-            ic_thread = Thread( target=run_ic_age )
-            ic_start = time.time()
-            ic_thread.start()
-
-            heartbeat_interval = 30 # seconds
-            while ic_thread.is_alive():
-                ic_thread.join( timeout=heartbeat_interval )
-                if ic_thread.is_alive():
-                    last_line = tail_log_line( ic_log_path )
-                    detail = ' | latest: %s' % last_line if last_line else \
-                             ' | (no log output yet)'
-                    print( now(), 'still processing initial-condition age %s... (%s elapsed)%s' %
-                           (oldest_age, format_duration( time.time() - ic_start ), detail) )
-            #end while
-
-            ic_result = ic_outcome['result']
+            ic_result = process_age( config_path, cwd, oldest_age, True,
+                                      control_d, overwrite_existing,
+                                      critical_log_path, log_lock, in_flight, progress_lock )
             results.append( ic_result )
-            report_progress()
 
             if ic_result['status'] == 'failed':
-                end_progress_line()
+                stop_status_reporter()
                 print( now(), '=' * 70 )
                 print( now(), 'CRITICAL: initial-condition age %s FAILED - aborting the '
                                'rest of this run.' % oldest_age )
@@ -643,8 +643,7 @@ def main():
             for age in remaining_ages:
                 results.append( process_age( config_path, cwd, age, False,
                                  control_d, overwrite_existing,
-                                 critical_log_path, log_lock ) )
-                report_progress()
+                                 critical_log_path, log_lock, in_flight, progress_lock ) )
             #end for
         else:
             cpuCount = control_d['nproc'];
@@ -662,16 +661,15 @@ def main():
                 futures = [
                     executor.submit( process_age, config_path, cwd, age, False,
                                       control_d, overwrite_existing,
-                                      critical_log_path, log_lock )
+                                      critical_log_path, log_lock, in_flight, progress_lock )
                     for age in remaining_ages
                 ]
                 for future in as_completed( futures ):
                     results.append( future.result() )
-                    report_progress()
             #end with
         #end if
 
-        end_progress_line()
+        stop_status_reporter()
         sys.exit( report_summary( results, critical_log_path, warnings_log_path,
                                    run_start_dt, datetime.datetime.now() ) )
     # parallel branch
