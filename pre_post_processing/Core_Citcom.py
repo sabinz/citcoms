@@ -1143,6 +1143,83 @@ def write_cap_or_proc_list_to_files( arg, filename, inp_list, \
 
     return out_names
 
+
+#=====================================================================
+#=====================================================================
+### Andres - build time from a time table if something went wrong when running the model.
+def read_step_age_existing_file(step_age_existing_path, verbose=verbose):
+    """
+    Build a CitcomS-style time_d dictionary from a 2-column table:
+
+        timestep   age_Ma
+
+    Returns the same structure as read_citcom_time_file():
+        time_d['step']         = [int, ...]
+        time_d['age_Ma']       = [float, ...]
+        time_d['runtime_Myr']  = [float, ...]
+        time_d['triples']      = [(step, age, runtime), ...]
+
+    We define runtime_Myr as a monotonic run-time coordinate:
+        runtime_Myr = oldest_age - age
+    so runtime increases forward as age decreases.
+    """
+
+    if verbose:
+        print(Core_Util.now(), 'read_step_age_existing_file:', step_age_existing_path)
+
+    step_l = []
+    age_l = []
+
+    with open(step_age_existing_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if (not line) or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+
+            step = int(float(parts[0]))
+            age  = float(parts[1])
+
+            step_l.append(step)
+            age_l.append(age)
+
+    if not step_l:
+        raise ValueError(f"read_step_age_existing_file: no valid rows in {step_age_existing_path}")
+
+    # Sort by timestep
+    pairs = sorted(zip(step_l, age_l), key=lambda x: x[0])
+    step_l = [p[0] for p in pairs]
+    age_l  = [p[1] for p in pairs]
+
+    # Oldest age defines runtime zero point
+    oldest_age = max(age_l)
+
+    runtime_l = []
+    triple_l = []
+    for step, age in zip(step_l, age_l):
+        runtime = oldest_age - age
+        runtime_l.append(runtime)
+        triple_l.append((int(step), float(age), float(runtime)))
+
+    d = {
+        'age_Ma': age_l,
+        'step': step_l,
+        'runtime_Myr': runtime_l,
+        'triples': triple_l
+    }
+
+    if verbose:
+        print(Core_Util.now(), 'read_step_age_existing_file: built time_d with', len(triple_l), 'rows')
+        # Optional sanity print:
+        # print(Core_Util.now(), 'min/max age:', min(age_l), max(age_l))
+        # print(Core_Util.now(), 'min/max step:', min(step_l), max(step_l))
+
+    return d
+
+#=====================================================================
+
 #=====================================================================
 #=====================================================================
 #=====================================================================
@@ -1501,12 +1578,25 @@ def get_time_triple_from_timestep(triple_list, test_step, verbose=verbose):
     min_step = triple_list[0][0]
     max_step = triple_list[-1][0]
 
-    if (test_step > max_step):
+## Original time stepping verification
+#    if (test_step > max_step):
+#        print( now(), 'get_time_triple_from_timestep: WARNING: test_step >= largest timestep (', max_step, '). Resetting to max value.')
+#        test_step = max_step
+#        #msg = 'test_step %i > max step %i' % (test_step, max_step)
+#        #raise IndexError(msg)
+#    if (test_step < min_step):
+#        print( now(), 'get_time_triple_from_timestep: WARNING: test_step <= smallest timestep (', min_step, '). Resetting to min value.')
+#        #msg = 'test_step %i < min step %i' % (test_step, min_step)
+#        #raise IndexError(msg)
+#        test_step = min_step
+        
+    # Andres - Converts time steps to integer if for whatever reason they are strings.
+    if (int(test_step) > int(max_step)):
         print( now(), 'get_time_triple_from_timestep: WARNING: test_step >= largest timestep (', max_step, '). Resetting to max value.')
         test_step = max_step
         #msg = 'test_step %i > max step %i' % (test_step, max_step)
         #raise IndexError(msg)
-    if (test_step < min_step):
+    if (int(test_step) < int(min_step)):
         print( now(), 'get_time_triple_from_timestep: WARNING: test_step <= smallest timestep (', min_step, '). Resetting to min value.')
         #msg = 'test_step %i < min step %i' % (test_step, min_step)
         #raise IndexError(msg)
