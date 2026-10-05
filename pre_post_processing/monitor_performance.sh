@@ -88,7 +88,11 @@ while true; do
         pid_args+=(-pid "$p")
     done
 
-    top_out=$(top -l 1 "${pid_args[@]}" -stats pid,command,cpu,mem,th 2>/dev/null)
+    # top's first sample always reports 0% CPU (no prior sample to diff
+    # against), so take two one-second-apart samples and keep only the
+    # last snapshot
+    top_out=$(top -l 2 -s 1 "${pid_args[@]}" -stats pid,command,cpu,mem,th 2>/dev/null \
+        | awk '/^Processes:/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}')
 
     sys_line=$(echo "$top_out" | grep "^CPU usage:")
     sys_user=$(echo "$sys_line" | sed -E 's/.*CPU usage: ([0-9.]+)% user.*/\1/')

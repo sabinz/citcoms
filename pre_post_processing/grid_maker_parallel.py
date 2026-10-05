@@ -18,8 +18,12 @@
 # file: /sample_data/grid_maker.cfg for more info.
 #=====================================================================
 #=====================================================================
+# Cascade implementation and deployment notes: grid_maker_parallel.md.
 import sys, string, os, shutil
-from multiprocessing import Pool, Process
+import subprocess
+from pathlib import Path
+
+_CASCADE_CONTEXT = None
 import numpy as np
 #=====================================================================
 import Core_Citcom
@@ -32,7 +36,7 @@ from Core_Util import now
 def usage():
     '''print usage message, and exit'''
 
-    print('''usage: grid_maker.py [-e] configuration_file.cfg
+    print('''usage: grid_maker_parallel.py [-e] configuration_file.cfg [procs]
 
 Options and arguments:
   
@@ -61,7 +65,11 @@ See the example config.cfg file for more info.
     sys.exit()
 #=====================================================================
 #=====================================================================
-def initialise_variables(configFile=sys.argv[1],verbose=False):
+def initialise_variables(configFile=None,verbose=False):
+    if _CASCADE_CONTEXT is not None:
+        return _CASCADE_CONTEXT['initialized']
+    if configFile is None:
+        configFile = sys.argv[1]
     # get the .cfg file as a dictionary
     control_d = Core_Util.parse_configuration_file( configFile, False, False )
     
@@ -90,469 +98,43 @@ def initialise_variables(configFile=sys.argv[1],verbose=False):
     return control_d, pid_file, master_d, coor_d, pid_d, datadir, datafile, start_age, output_format, depth_list, nodez, nproc_surf
 
 def main():
-    print( now(), 'grid_maker.py')
+    return run(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else None)
 
+
+def times_parallel(task):
+    """Process a resolved timestep; depth work stays inside this age worker."""
     control_d, pid_file, master_d, coor_d, pid_d, datadir, datafile, start_age, output_format, depth_list, nodez, nproc_surf = initialise_variables()
-    
-    # print(master_d['time_d']['triples'][2])
-    # for t in master_d['time_d']['triples']:
-    #     print(int(t[1]))
-    # sys.exit()
-
-    # Set the verbose settings
-    if 'verbose' in control_d:
-        print(f"{now()} Verbose is set to {control_d['verbose']} in the config file")
-        verbose=control_d['verbose']
+    timestep = task['timestep']
+    age_Ma_storing = task['age']
+    age_Ma = '%03d' % task['age']
+    runtime_Myr = task['runtime']
+    verbose = control_d.get('verbose', False)
+    lon, lat = _CASCADE_CONTEXT['lon'], _CASCADE_CONTEXT['lat']
+    if nproc_surf == 12:
+        grid_R = 'd' if control_d.get('shift_lon', False) else 'g'
     else:
-        print(f"{now()} Verbose is not set in config file, using defaults (probably verbose=False)")
-        verbose=False
-
-    if len(sys.argv) > 2: # Prescribe procs from 2nd argument in command line. note, if removing this, also remove the 'if name==__main__' thing back to 2 args
-        procs = int(sys.argv[2])
-        print(f'Number of processes prescribed from command line: {procs}')
-    elif 'procs' in control_d:
-        procs = control_d['procs']
-    else:
-        print(f"{now()} Number of processors for parallel computing is not set. Will use 2 processors for now.)")
-        procs = 1
-
-    # Adjust verbose settings for all other functions- can be manually adjusted if you want to mix and match 
-    Core_Util.verbose = verbose 
-    Core_Citcom.verbose = verbose 
-    Core_isoGMT.verbose = verbose
-
-    # Set the debug settings
-    if 'debug' in control_d:
-        print(f"{now()} Debug is set to {control_d['debug']} in the config file")
-        debug=control_d['debug']
-    else:
-        print(f"{now()} Debug is not set in config file, using defaults (probably debug=False)")
-        debug=False
-
-    # Double check for essential data 
-    if master_d['time_d'] == None : 
-        print( now() )
-        print('ERROR: Required file "[CASE_NAME].time:" is missing from this model run.')
-        print('       Aborting processing.')
-        sys.exit(-1)
-
-    # Check how to read and parse the time spec:
-    read_time_d = True
-    #read_time_d = False
-    
-    # Compute the timesteps to process
-    if read_time_d : 
-        time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'], master_d['time_d'])
-        
-    else :
-        time_spec_d = Core_Citcom.get_time_spec_dictionary(control_d['time_spec'])
-    print ( now(), 'grid_maker.py: time_spec_d = ')
-    if verbose: Core_Util.tree_print( time_spec_d )
-
-    # levels to process 
-    level_spec_d = Core_Util.get_spec_dictionary( control_d['level_spec'] )
-    print ( now(), 'grid_maker.py: level_spec_d = ')
-    if verbose: Core_Util.tree_print( level_spec_d )
-
-    # Get coordinate data 
-    lon = []
-    lat = []
-    
-    # Check for existing coordinate data
-    lon_file_cache = '_cache_lon_coords.txt'
-    lat_file_cache = '_cache_lat_coords.txt'
-
-    if os.path.exists( lon_file_cache ) and os.path.exists( lat_file_cache ) :
-        print( now(), 'grid_maker.py: loadtxt: ', lon_file_cache )
-        print( now(), 'grid_maker.py: loadtxt: ', lat_file_cache )
-        lon = np.loadtxt( lon_file_cache )
-        lat = np.loadtxt( lat_file_cache )
-    else : 
-        # gets lon, lat for one depth because these are depth-independent
-        coord_file_format = control_d.get('coord_dir','') + '/%(datafile)s.coord.#' % vars()
-        coord = Core_Citcom.read_citcom_surface_coor( master_d['pid_d'], coord_file_format )
-
-        # flatten data since we don't care about specific cap numbers for the loop over depth
-        coord = Core_Util.flatten_nested_structure( coord )
-
-        # extract data from tuples and make into numpy array
-        lon = [line[0] for line in coord]
-        lat = [line[1] for line in coord]
-
-        # save the lat data 
-        np.savetxt( lon_file_cache, lon, fmt='%f' )
-        np.savetxt( lat_file_cache, lat, fmt='%f' )
-
-    # end of get coords
-    print( now(), 'grid_maker.py: len(lon) = ', len(lon) )
-    print( now(), 'grid_maker.py: len(lat) = ', len(lat) )
-
-    #
-    # Main looping, first over times, then sections, then levels
-    # 
-
-    # Variables that will be updated each loop:
-    # age_Ma will be a zero padded string value used for filenames and reporting 
-    # depth will be a zero padded string value used for filenames and reporting 
-
-    # Variables to hold data for all grids created
-    # grid_list is a list of tuples: (grid_filename, age_Ma) 
-    grid_list = []
-
-    print(now(), '=========================================================================')
-    print(now(), 'grid_maker.py: Main looping, first over times, then sections, then levels')
-    print(now(), '=========================================================================')
-    
-    # Loop over times
-    # Only append ages to var list that match ages in the citcoms data (avoids double ups)
-    # Note: this can be cleaned up a little - it's essentially been copied from below
-    varList = []
-    for tt, time in enumerate( time_spec_d['time_list'] ):
-        print(f'tt:{tt}')
-        print(time)
-
-        if 'Ma' in time:
-        
-            # strip off units and make a number
-            time = float( time.replace('Ma', '') )
-
-            # determine what time steps are available for this age 
-            # NOTE: 'temp' is requried to set which output files to check 
-            found_d = Core_Citcom.find_available_timestep_from_age( master_d, 'temp', time )
-
-            # print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
-            # print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
-            # print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
-
-            # set variables for subsequent loops
-            timestep = found_d['found_timestep']
-            runtime_Myr = found_d['found_runtime']
-
-            # convert the found age to an int
-            age_Ma = int(np.around( found_d['found_age'] ) )
-
-            # save age number for grids storage
-            age_Ma_storing=age_Ma
-             
-            age_Ma = '%03d' % age_Ma
-
-        else:
-
-            time = float( time ) 
-             
-            # determine what time steps are available for this timestep 
-            # NOTE: 'temp' is requried to set which output files to check 
-
-            found_d = Core_Citcom.find_available_timestep_from_timestep( master_d, 'temp', time )
-
-            print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
-            print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
-            print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
-
-            # set variables for subsequent loops
-            timestep = found_d['found_timestep']
-            runtime_Myr = found_d['found_runtime']
-
-            # convert the found age to an int
-            age_Ma = int(np.around( found_d['found_age'] ) )
-            
-            # make a string and pad with zeros 
-            #age_Ma = '%03d' % age_Ma
-            age_Ma = str(age_Ma)
-
-        print(found_d)
-
-
-        print(age_Ma)
-        print('\n')
-
-        if int(time) == int(age_Ma): # Think about changing this so it chooses the nearest age, but still doesn't double up
-            varList.append((tt,f'{time}Ma',master_d, control_d, nproc_surf, datadir, datafile, level_spec_d, lon, lat, grid_list, depth_list, nodez, debug, pid_file, verbose))
-        else:
-            continue
-
-    # Multiprocessing of times with old-style batching - specify number of processes with 'procs' in cfg or as an argument on command line
-    batches = divmod(len(varList), procs) # Return number of batches and the remainder
-    for i in range(batches[0]+1): # Loop over the number of batches
-        if i == batches[0]: # If we're at the last (or only) batch 
-            processes = [None] * batches[1] # Batch size of remainder
-        else:
-            processes = [None] * procs # Batch size specified by procs
-        print(processes)
-        for j in range(len(processes)): # Send each process of batch to a child process
-            k = (procs*i) + j # Total index count of all times that have been sent out across all batches
-            print(f'##### {k} #####')
-            processes[j] = Process(target=times_parallel, args=(varList[k],))
-            processes[j].start()
-        for j in range(len(processes)):
-            # print(f'################ {processes}')
-            processes[j].join()
-
-def times_parallel(varsList):
-    tt = varsList[0]
-    time = varsList[1]
-    master_d = varsList[2]
-    control_d = varsList[3]
-    nproc_surf = varsList[4]
-    datadir = varsList[5]
-    datafile = varsList[6]
-    level_spec_d = varsList[7]
-    lon = varsList[8]
-    lat = varsList[9]
-    grid_list = varsList[10]
-    depth_list = varsList[11]
-    nodez = varsList[12]
-    debug = varsList[13]
-    pid_file = varsList[14]
-    verbose = varsList[15]
-    print( now(), 'grid_maker.py: Processing time = ', time) 
-    # print( now(), 'grid_maker.py: Processing time = ', tt) 
-    if 'Ma' in time:
-    
-        # strip off units and make a number
-        time = float( time.replace('Ma', '') )
-
-        # determine what time steps are available for this age 
-        # NOTE: 'temp' is requried to set which output files to check 
-        found_d = Core_Citcom.find_available_timestep_from_age( master_d, 'temp', time )
-
-        print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
-        print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
-        print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
-
-        # set variables for subsequent loops
-        timestep = found_d['found_timestep']
-        runtime_Myr = found_d['found_runtime']
-
-        # convert the found age to an int
-        age_Ma = int(np.around( found_d['found_age'] ) )
-
-        # save age number for grids storage
-        age_Ma_storing=age_Ma
-         
-        age_Ma = '%03d' % age_Ma
-
-    else:
-
-        time = float( time ) 
-         
-        # determine what time steps are available for this timestep 
-        # NOTE: 'temp' is requried to set which output files to check 
-
-        found_d = Core_Citcom.find_available_timestep_from_timestep( master_d, 'temp', time )
-
-        print( now(), 'grid_maker.py: WARNING: Adjusting times to match available data:')
-        print( now(), '  request_age =', found_d['request_age'], '; request_timestep =', found_d['request_timestep'], '; request_runtime =', found_d['request_runtime'])
-        print( now(), '  found_age =', found_d['found_age'], '; found_timestep =', found_d['found_timestep'], '; found_runtime =', found_d['found_runtime'])
-
-        # set variables for subsequent loops
-        timestep = found_d['found_timestep']
-        runtime_Myr = found_d['found_runtime']
-
-        # convert the found age to an int
-        age_Ma = int(np.around( found_d['found_age'] ) )
-        
-        # make a string and pad with zeros 
-        #age_Ma = '%03d' % age_Ma
-        age_Ma = str(age_Ma)
-        
-    # output dir add - RC
-    output_dir_age = int(np.around(found_d['found_age']))
-
-    # report on integer age
-    print( now(), '  age_Ma =', age_Ma)
-    
-    # empty file_data
-    file_data = []
-    
-    # cache for the file_format
-    file_format_cache = ''
-    
-
-    
-    # Loop over sections (fields) 
-    for ss, s in enumerate (control_d['_SECTIONS_'] ) :
-        print( now(), 'grid_maker.py: Processing section = ', s) 
-
-        # check for required parameter 'field'
-        if not 'field' in control_d[s] :
-           print('ERROR: Required parameter "field" missing from section.')
-           print('       Skipping this section.')
-           continue # to next section
-
-        # get the field name 
-        field_name = control_d[s]['field']
-
-        # check for compound field
-        field_name_req = ''
+        grid_R = '/'.join(str(pid_d[key]) for key in ('lon_min', 'lon_max', 'lat_min', 'lat_max'))
+    file_format_cache, file_data = None, None
+    for ss, section in enumerate(control_d['_SECTIONS_']):
+        requested = control_d[section]['field']
+        field_name = {'Vx': 'vx', 'Vy': 'vy', 'Vz': 'vz'}.get(requested, requested)
+        read_field = 'vx' if field_name == 'horiz_vmag' else field_name
+        mapping = Core_Citcom.field_to_file_map[read_field]
+        pattern = task['patterns'][section]
+        if pattern != file_format_cache:
+            nested = Core_Citcom.read_proc_files_to_cap_list(pid_d, pattern, read_field)
+            file_data = Core_Util.flatten_nested_structure(nested)
+            file_format_cache = pattern
+        field_data = np.asarray([row[mapping['column']] for row in file_data], dtype=float)
         if field_name == 'horiz_vmag':
-            # save the requested name
-            field_name_req = field_name
-            # reset to get one component 
-            field_name = 'vx'
-            
-        if field_name == 'Vx':
-            # save the requested name
-            field_name_req = field_name
-            # reset to get one component
-            field_name = 'vx'
-            
-        if field_name == 'Vy':
-            # save the requested name
-            field_name_req = field_name
-            # reset to get one component
-            field_name = 'vy'
-            
-        if field_name == 'Vz':
-            # save the requested name
-            field_name_req = field_name
-            # reset to get one component
-            field_name = 'vz'
-
-
-        print('')
-        print( now(), 'grid_maker.py: Processing: field =', field_name) 
-
-        # set the region
-        if nproc_surf == 12:
-            grid_R = 'g'
-            # optionally adjust the lon bounds of the grid to -180/180
-            if 'shift_lon' in control_d :
-                print( now(), 'grid_maker.py: grid_R set to to "d" : -180/+180/-90/90')
-                grid_R = 'd'
-            else :
-                print( now(), 'grid_maker.py: grid_R set to to "g" : 0/360/-90/90')
-        else:
-            grid_R  = str(pid_d['lon_min']) + '/' + str(pid_d['lon_max']) + '/'
-            grid_R += str(pid_d['lat_min']) + '/' + str(pid_d['lat_max'])
-
-        # get the data file name specifics for this field 
-        file_name_component = Core_Citcom.field_to_file_map[field_name]['file']
-        print( now(), 'grid_maker.py: file_name_component = ', file_name_component )
-
-        # get the data file column name specifics for this field 
-        field_column = Core_Citcom.field_to_file_map[field_name]['column']
-        print( now(), 'grid_maker.py: field_column = ', field_column )
-        
-    
-        # create the total citcoms data filenames to read 
-        file_format = ''
-        
-        pos_for_abspath = datadir.find ("/Data")
-        
-        # check for various data dirs
-        if os.path.exists( datadir + '/0/') :
-            
-            print( now(), 'grid_maker.py: path found = ', datadir + '/0/' )
-            file_format = datadir + '/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-
-        elif os.path.exists( datadir + '/' ) :
-            print( now(), 'grid_maker.py: path found = ', datadir + '/' )
-            file_format = datadir + '/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-
-        elif os.path.exists('data') :
-            print( now(), 'grid_maker.py: path found = ', 'data' )
-            file_format = './data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-
-        elif os.path.exists('Data') :
-            print( now(), 'grid_maker.py: path found = ', 'Data' )
-            file_format = './Data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-            
-        
-        # Added path to dynamic topography post-processing - RC
-        elif os.path.exists('Age'+str(age_Ma)+'Ma') :
-            print( now(), 'grid_maker.py: path found = ', datadir )
-            file_format = './Age'+str(age_Ma)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
-        
-        # Added path to dynamic topography post-processing - RC
-        elif os.path.exists('Age'+str(output_dir_age)+'Ma') :
-            print( now(), 'grid_maker.py: path found = ', datadir )
-            file_format = './Age'+str(output_dir_age)+'Ma/#/' + datafile + '.' + file_name_component + '.#.'+ str(timestep)
-        
-        # Added path to post-process with remote location - RC
-        elif os.path.exists(datadir[:pos_for_abspath]) :
-                
-             file_format = datadir[:pos_for_abspath]+'/data/#/' + datafile + '.' + file_name_component + '.#.' + str(timestep)
-        
-        
-        # report error 
-        else :
-            print( now() )
-            print('ERROR: Cannot find output data.')
-            print('       Skipping this section.')
-            print( now(), 'grid_maker.py: file_format = ', file_format)
-            continue # to next section
-        
-        print( now(), 'grid_maker.py: file_format = ', file_format )
-
-        # check if this file data has already been read in 
-        if not file_format == file_format_cache: 
-
-            # read data by proc, e.g., velo, visc, comp_nd, surf, botm 
-            file_data = Core_Citcom.read_proc_files_to_cap_list( master_d['pid_d'], file_format, field_name)
-            # flatten data since we don't care about specific cap numbers for the loop over levels/depths
-            file_data = Core_Util.flatten_nested_structure( file_data )
-            print( now(), 'grid_maker.py: len(file_data) = ', len(file_data) )
-
-            # update cache for next pass in loop over fields
-            file_format_cache = file_format
-
-        # Get the specific column for this field_name
-        field_data = np.array( [ line[field_column] for line in file_data ] )
-        print( now(), 'grid_maker.py:  len(field_data) = ', len(field_data) )
-
-        # Check for compound field
-        if field_name_req == 'horiz_vmag':
-            
-            # Get the second component data ('vy')
-            #field_column = 1
-            # RC note - this is now extracting Vy as read by gmt N-S component 
-            field_column = 0
-            # read data by proc, e.g., velo, visc, comp_nd, surf, botm 
-            file_data2 = Core_Citcom.read_proc_files_to_cap_list( master_d['pid_d'], file_format, field_name)
-            # flatten data since we don't care about specific cap numbers for the loop over levels/depths
-            file_data2 = Core_Util.flatten_nested_structure( file_data2 )
-            print( now(), 'grid_maker.py: len(file_data2) = ', len(file_data2) )
-            field_data2 = np.array( [ line[field_column] for line in file_data2 ] )
-            print( now(), 'grid_maker.py:  len(field_data2) = ', len(field_data) )
-
-            # combine the data and rest the main variable
-            field_data3 = np.hypot( field_data, field_data2)
-            field_data = field_data3
-
-            # put back field name to requested name
-            field_name = field_name_req 
-        # end if check on compound field
-
-
-        print( now(), 'grid_maker.py:  len(field_data) = ', len(field_data) )
-        print( now() )
-       
-        #
-        # Loop over levels 
-
-        levels = enumerate( level_spec_d['list'] )
-        varList = []
-        for level in levels:
-            varList.append(level + (tt, ss, s, timestep, age_Ma, runtime_Myr, field_name, field_data, age_Ma_storing, lon, lat, grid_R, grid_list, verbose))
-
-        # Loop over levels in parralel only if multiprocess_depths is set to true
-        try:
-            if control_d[s]['multiprocess_depths']:
-                with Pool() as p:
-                    p.map(levels_parallel, varList)
-                    p.close()
-                    p.join()
-            # If set to anything other than true, loop over levels conventionally
-            else:
-                print('Looping over depths one at a time')
-                for level in varList:
-                    levels_parallel(level)
-        except KeyError:
-            # Loop over levels conventioanlly if multiprocess depths doesn't exist at all
-            print('Looping over depths one at a time')
-            for level in varList:
-                levels_parallel(level)
+            north = np.asarray([row[Core_Citcom.field_to_file_map['vy']['column']] for row in file_data], dtype=float)
+            field_data = np.hypot(field_data, north)
+        if not np.isfinite(field_data).all():
+            raise ValueError('Non-finite source values for %s' % section)
+        for ll, level in enumerate(_CASCADE_CONTEXT['levels']):
+            levels_parallel((ll, level, task['timestep'], ss, section, timestep, age_Ma,
+                             runtime_Myr, field_name, field_data, age_Ma_storing,
+                             lon, lat, grid_R, [], verbose))
 
 
 def levels_parallel(varsList):
@@ -604,7 +186,10 @@ def levels_parallel(varsList):
 
     print( now(), 'grid_maker.py: xyz_filename =', xyz_filename)
     
-    if field_name == 'visc': field_slice = np.log10( field_slice )
+    if field_name == 'visc':
+        if np.any(field_slice <= 0):
+            raise ValueError('Viscosity must be positive before log10')
+        field_slice = np.log10(field_slice)
 
     print( now(), 'grid_maker.py: type(field_slice) = ', type(field_slice) )
     print( now(), 'grid_maker.py:  len(field_slice) = ', len(field_slice) )
@@ -652,25 +237,7 @@ def levels_parallel(varsList):
     # create the grid
     grid_filename = xyz_filename.rstrip('xyz') + 'nc'
 
-    surface_I = control_d[s].get('surface_I', '0.25')
-    cmd = median_xyz_filename + ' -I' + str(surface_I) + ' -R' + grid_R 
-
-    if 'Ll' in control_d[s]:
-        cmd += ' -Ll' + str(control_d[s]['Ll'])
-    if 'Lu' in control_d[s]:
-        cmd += ' -Lu' + str(control_d[s]['Lu'])
-    if 'T' in control_d[s]:
-        cmd += ' -T' + str(control_d[s]['T'])
-
-    #opt_a = 
-    try:
-        print(f'{now()} Trying the spherical interpolator')
-        Core_isoGMT.callgmt( 'sphinterpolate', cmd, '', '', ' -G' + grid_filename )
-    except:
-        print(f'{now()} Spherical interpolator unsuccesful. Using gmt surface instead. This may cause some issues around the poles')
-        Core_isoGMT.callgmt( 'surface', cmd, '', '', ' -G' + grid_filename )
-    else:
-        print(f'{now()} Spherical interpolator worked succesfully')
+    interpolate(median_xyz_filename, grid_filename, control_d[s], grid_R)
 
     # Produce a grid showing deviation from average
     if control_d[s].get('deviation'):
@@ -691,38 +258,23 @@ def levels_parallel(varsList):
         # create the grid
         grid_filename_dev = xyz_filename_dev.rstrip('xyz') + 'nc'
 
-        cmd = median_xyz_filename_dev + ' -I' + str(surface_I) + ' -R' + grid_R 
-        if 'Ll' in control_d[s]:
-            cmd += ' -Ll' + str(control_d[s]['Ll'])
-        if 'Lu' in control_d[s]:
-            cmd += ' -Lu' + str(control_d[s]['Lu'])
-        if 'T' in control_d[s]:
-            cmd += ' -T' + str(control_d[s]['T'])
-
-        try:
-            print(f'{now()} Trying the spherical interpolator')
-            Core_isoGMT.callgmt( 'sphinterpolate', cmd, '', '', ' -G' + grid_filename_dev )
-        except:
-            print(f'{now()} Spherical interpolator unsuccesful. Using gmt surface instead. This may cause some issues around the poles')
-            Core_isoGMT.callgmt( 'surface', cmd, '', '', ' -G' + grid_filename_dev )
-        else:
-            print(f'{now()} Spherical interpolator worked succesfully')
+        interpolate(median_xyz_filename_dev, grid_filename_dev, control_d[s], grid_R)
 
         dev_dir_name = f'{field_name}_deviation'
-        dev_grid_dir=f'{datafile}/{dev_dir_name}/{age_Ma_storing}'
+        dev_grid_dir=f"{control_d['_grid_output_root']}/{dev_dir_name}/{age_Ma_storing}.inprogress"
 
         os.makedirs(f'{dev_grid_dir}', exist_ok=True)
         if os.path.isfile(f'{dev_grid_dir}/{grid_filename_dev}'):
             os.remove(f'{dev_grid_dir}/{grid_filename_dev}')
         shutil.move(grid_filename_dev, f'{dev_grid_dir}')
 
-        if not 'debug' in control_d:
+        if not control_d.get('debug', False):
             os.remove(xyz_filename_dev)
             os.remove(median_xyz_filename_dev
                 )
 
     ### Jono- uncomment below to produce plots
-    if 'debug' in control_d:
+    if control_d.get('debug', False):
         # label the variables
         
         # −Dxname/yname/zname/scale/offset/title/remark
@@ -733,7 +285,9 @@ def levels_parallel(varsList):
     if control_d[s].get('dimensional'):
         print( now(), 'grid_maker.py: dimensional = ', control_d[s]['dimensional'])
         dim_grid_name = grid_filename.replace('.nc', '_dimensional.nc')
-        Core_Citcom.dimensionalize_grid(pid_file, field_name, grid_filename, dim_grid_name, verbose=verbose)
+        dim = _CASCADE_CONTEXT['dimension_map'][field_name]
+        cmd = '%s %f MUL %s ADD' % (grid_filename, dim['coef'], dim['const'])
+        Core_isoGMT.callgmt('grdmath', cmd, '', '=', dim_grid_name)
 
         dim_dir_name = f'{field_name}_dimensional'
 
@@ -743,11 +297,15 @@ def levels_parallel(varsList):
     else: 
         grid_list.append( (grid_filename, age_Ma) )
 
+    J = control_d[s].get('J', 'X5/3')
+    C = control_d[s].get('C', 'polar')
+
     # Optional step to transform grid to plate frame
-    if 'make_plate_frame_grid' in control_d :
+    if control_d.get('make_plate_frame_grid', False):
         cmd = 'frame_change_pygplates.py %(age_Ma)s %(grid_filename)s %(grid_R)s' % vars()
         print(now(), 'grid_maker.py: cmd =', cmd)
-        os.system(cmd)
+        subprocess.check_call([sys.executable, str(Path(__file__).with_name('frame_change_pygplates.py')),
+                               str(age_Ma), grid_filename, grid_R])
 
 
     # Assoicate this grid with GPlates exported line data in .xy format:
@@ -758,7 +316,7 @@ def levels_parallel(varsList):
     time_triple = Core_Citcom.get_time_triple_from_timestep(master_d['time_d']['triples'], timestep, verbose=verbose)
     age_float = time_triple[1]
 
-    if 'debug' in control_d:
+    if control_d.get('debug', False):
         # truncate to nearest int and make a string for the gplates .xy file name 
         if age_float < 0: age_float = 0.0
         xy_path = master_d['geoframe_d']['gplates_line_dir']
@@ -789,7 +347,7 @@ def levels_parallel(varsList):
             Core_isoGMT.plot_grid( dim_grid_name, xy_filename, grid_R, T, J)
 
     # plot plate frame grid 
-    if 'make_plate_frame_grid' in control_d :
+    if control_d.get('make_plate_frame_grid', False):
         plateframe_grid_name = grid_filename.replace('.nc', '-plateframe.nc')
         xy_filename = ''
         xy_path = master_d['geoframe_d']['gplates_line_dir']
@@ -805,23 +363,29 @@ def levels_parallel(varsList):
     # For normal (non-debug) mode, the produced grids go into neat folders
     # JONO - create field and age directories if needed. Done here
     # os.makedirs(field_name, exist_ok=True)
-    grid_dir=f'{datafile}/{field_name}/{age_Ma_storing}'
+    grid_dir=f"{control_d['_grid_output_root']}/{field_name}/{age_Ma_storing}.inprogress"
     os.makedirs(grid_dir, exist_ok=True)
     
     if os.path.isfile(f'{grid_dir}/{grid_filename}'):
         os.remove(f'{grid_dir}/{grid_filename}')
     shutil.move(grid_filename, f'{grid_dir}')
+    if control_d.get('make_plate_frame_grid', False):
+        for artifact in (plateframe_grid_name,
+                         str(Path(plateframe_grid_name).with_suffix('.ps')),
+                         str(Path(plateframe_grid_name).with_suffix('.png')),
+                         str(Path(plateframe_grid_name).with_suffix('.cpt'))):
+            shutil.move(artifact, grid_dir)
 
     # Add dimensionalised grid to its own folder
     if control_d[s].get('dimensional'):
-        dim_grid_dir=f'{datafile}/{dim_dir_name}/{age_Ma_storing}'
+        dim_grid_dir=f"{control_d['_grid_output_root']}/{dim_dir_name}/{age_Ma_storing}.inprogress"
         os.makedirs(f'{dim_grid_dir}', exist_ok=True)
 
         if os.path.isfile(f'{dim_grid_dir}/{dim_grid_name}'):
             os.remove(f'{dim_grid_dir}/{dim_grid_name}')
         shutil.move(dim_grid_name, f'{dim_grid_dir}')
 
-    if 'debug' in control_d:
+    if control_d.get('debug', False):
         if os.path.isfile(f'{grid_dir}/{xyz_filename}'):
             os.remove(f'{grid_dir}/{xyz_filename}')
         shutil.move(xyz_filename, f'{grid_dir}')
@@ -863,7 +427,7 @@ def levels_parallel(varsList):
 
 
     # remove some of the unneeded files
-    if not 'debug' in control_d:
+    if not control_d.get('debug', False):
         os.remove(xyz_filename)
         os.remove(median_xyz_filename)
 
@@ -878,6 +442,572 @@ def levels_parallel(varsList):
 #                    #    Core_isoGMT.callgmt('grdedit', arg, opts)
 #=====================================================================
 #=====================================================================
+import contextlib
+import copy
+import datetime
+import fcntl
+import glob
+import hashlib
+import json
+import math
+import multiprocessing
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import time
+import traceback
+import uuid
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+
+import numpy as np
+
+import Core_Citcom
+import Core_isoGMT
+import Core_Util
+
+
+MANIFEST = "grid_complete.json"
+CONTEXT = None
+
+
+def report(message):
+    print(f"{Core_Util.now()} {message}", flush=True)
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def write_json(path, data):
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w") as stream:
+        json.dump(data, stream, indent=2, sort_keys=True, allow_nan=False)
+        stream.write("\n")
+    os.replace(temporary, path)
+
+
+def identity(path):
+    path = Path(path).resolve()
+    info = path.stat()
+    if not path.is_file() or info.st_size <= 0:
+        raise ValueError(f"Missing or empty input: {path}")
+    return {"path": str(path), "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+
+
+def nonempty(path):
+    path = Path(path)
+    return path.is_file() and path.stat().st_size > 0
+
+
+def parse_times(spec):
+    def value(text):
+        text = str(text).strip()
+        unit = "Ma" if text.endswith("Ma") else "Myr" if text.endswith("Myr") else "step"
+        number = float(text[:-len(unit)].strip() if unit != "step" else text)
+        if not math.isfinite(number):
+            raise ValueError("Time requests must be finite")
+        return number, unit
+    if isinstance(spec, (list, tuple)):
+        if not spec:
+            raise ValueError("Time/level requests cannot be empty")
+        return [value(item) for item in spec]
+    text = str(spec).strip().strip("[]")
+    if text.endswith(".dat"):
+        requests = []
+        for line in Path(text).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                requests.extend(parse_times(line))
+        if not requests:
+            raise ValueError(f"Empty time/level request file: {text}")
+        return requests
+    if "/" not in text:
+        return [value(item) for item in text.split(",")]
+    parts = text.split("/")
+    if len(parts) != 3:
+        raise ValueError("time_spec range requires start/end/step")
+    (start, unit), (end, end_unit), (step, step_unit) = map(value, parts)
+    if unit != end_unit or step_unit not in (unit, "step") or step <= 0:
+        raise ValueError("time_spec requires matching endpoint units and a positive step")
+    count = int(math.floor(abs(end - start) / step + 1e-10)) + 1
+    if count > 100000:
+        raise ValueError("Too many time requests")
+    direction = 1 if end >= start else -1
+    return [(start + index * direction * step, unit) for index in range(count)]
+
+
+def parse_levels(spec, nodez):
+    # Same list/range syntax, including descending ranges and a single endpoint.
+    values = parse_times(spec)
+    if any(unit != "step" or int(value) != value or not 0 <= value < nodez for value, unit in values):
+        raise ValueError(f"level_spec must contain integer levels from 0 to {nodez - 1}")
+    return list(dict.fromkeys(int(value) for value, _ in values))
+
+
+def output_field(field):
+    return {"Vx": "vx", "Vy": "vy", "Vz": "vz"}.get(field, field)
+
+
+def file_field(field):
+    field = output_field(field)
+    return "vx" if field == "horiz_vmag" else field
+
+
+def inventory(pid, field):
+    component = Core_Citcom.field_to_file_map[file_field(field)]["file"]
+    reference_rank = pid["nprocz"] - 1 if component == "surf" else 0
+    datadir = str(pid["datadir"]).strip('"\'')
+    directories = [datadir.replace("%RANK", "#")] if "%RANK" in datadir else [datadir + "/#", datadir]
+    directories += ["data/#", "Data/#"]
+    directories += [str(Path(age) / "#") for age in sorted(glob.glob("Age*Ma"))]
+    steps = {}
+    for directory in dict.fromkeys(directories):
+        zero = str(Path(directory.replace("#", str(reference_rank))) /
+                   f"{pid['datafile']}.{component}.{reference_rank}.")
+        found = {}
+        for name in glob.glob(glob.escape(zero) + "*"):
+            suffix = name.rsplit(".", 1)[-1]
+            if suffix.isdigit():
+                found[int(suffix)] = str(Path(directory).absolute() / f"{pid['datafile']}.{component}.#.{suffix}")
+        if found:
+            if not directory.startswith("Age"):
+                return found
+            for step, pattern in found.items():
+                if step in steps and steps[step] != pattern:
+                    raise ValueError(f"Ambiguous source timestep {step} for {field}: multiple Age folders")
+                steps[step] = pattern
+    if not steps:
+        raise ValueError(f"No processor-{reference_rank} {component} files found for {field}")
+    return steps
+
+
+def expected_outputs(control, pid, depths, levels, age):
+    outputs = {}
+    for section in control["_SECTIONS_"]:
+        options = control[section]
+        field = output_field(options["field"])
+        for level in levels:
+            stem = f"{pid['datafile']}_{field}_t{age}_{int(depths[level])}"
+            products = {field: [stem + ".nc"]}
+            if options.get("dimensional"):
+                products[field + "_dimensional"] = [stem + "_dimensional.nc"]
+            if options.get("deviation"):
+                products[field + "_deviation"] = ["deviation_" + stem + ".nc"]
+            if control.get("debug", False):
+                products[field] += [stem + ".xyz", stem + ".median.xyz", stem + ".ps", stem + ".png", stem + ".cpt"]
+                if options.get("dimensional"):
+                    products[field + "_dimensional"] += [stem + "_dimensional" + suffix for suffix in (".ps", ".png", ".cpt")]
+            if control.get("make_plate_frame_grid", False):
+                products[field] += [stem + "-plateframe" + suffix for suffix in (".nc", ".ps", ".png", ".cpt")]
+            for category, names in products.items():
+                previous = outputs.setdefault(category, [])
+                if set(previous) & set(names):
+                    raise ValueError(f"Output filename collision for {category}; sections or rounded depths overlap")
+                previous.extend(names)
+    return outputs
+
+
+def make_tasks(control, master, levels):
+    pid = master["pid_d"]
+    inventories = {section: inventory(pid, control[section]["field"]) for section in control["_SECTIONS_"]}
+    common = set.intersection(*(set(steps) for steps in inventories.values()))
+    triples = [tuple(triple) for triple in master["time_d"]["triples"] if int(triple[0]) in common]
+    if not triples:
+        raise ValueError("No timesteps are available for all requested fields")
+    tasks, folders = {}, {}
+    for request, unit in parse_times(control["time_spec"]):
+        index = {"step": 0, "Ma": 1, "Myr": 2}[unit]
+        step, actual_age, runtime = min(triples, key=lambda item: (abs(float(item[index]) - request), float(item[1])))
+        step, actual_age = int(step), float(actual_age)
+        age = int(np.around(actual_age))
+        if age in folders and folders[age] != step:
+            raise ValueError(f"Different timesteps round to the same output age {age} Ma")
+        folders[age] = step
+        if step in tasks:
+            tasks[step]["requests"].append([request, unit])
+            continue
+        patterns = {section: steps[step] for section, steps in inventories.items()}
+        sources = {}
+        for section, pattern in patterns.items():
+            names, _ = Core_Citcom.define_cap_or_proc_names(pid, pattern, "proc")
+            component = Core_Citcom.field_to_file_map[file_field(control[section]["field"])]["file"]
+            for rank, name in enumerate(names):
+                # Only top/bottom radial processors have surface/bottom files.
+                kk = rank % pid["nprocz"]
+                required = component not in ("surf", "botm") or kk == (pid["nprocz"] - 1 if component == "surf" else 0)
+                if required or Path(name).exists():
+                    sources[name] = identity(name)
+        tasks[step] = {"timestep": step, "actual_age": actual_age, "runtime": float(runtime),
+                       "age": age, "patterns": patterns, "sources": list(sources.values()),
+                       "requests": [[request, unit]], "outputs": expected_outputs(control, pid, master["coor_d"]["depth_km"], levels, age)}
+    return sorted(tasks.values(), key=lambda item: (-item["actual_age"], item["timestep"]))
+
+
+def signature(context, task):
+    return digest({"context": context["signature"], "step": task["timestep"],
+                   "age": task["actual_age"], "sources": task["sources"], "outputs": task["outputs"]})
+
+
+def workspace(context, task):
+    return Path(context["output_root"]) / "gridmaker-work" / f"{task['age']}Ma.inprogress"
+
+
+def make_workspace_visible(context):
+    old = Path(context["output_root"]) / ".gridmaker-work"
+    new = Path(context["output_root"]) / "gridmaker-work"
+    if not old.exists():
+        return
+    if new.exists():
+        raise ValueError(f"Both hidden and visible grid workspaces exist: {old}, {new}")
+    with contextlib.ExitStack() as leases:
+        for path in old.glob("*/.worker.lock"):
+            lease = leases.enter_context(path.open("a+"))
+            try:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise ValueError(f"An earlier worker is still preparing {path.parent}; wait before renaming") from error
+        old.rename(new)
+    report(f"Made grid workspace visible: {new}")
+
+
+def folder(context, task, category, temporary=False):
+    return Path(context["output_root"]) / category / (str(task["age"]) + (".inprogress" if temporary else ""))
+
+
+def checked_files(directory, names):
+    directory = Path(directory)
+    return (all(nonempty(directory / name) for name in names)
+            and all(path.stat().st_size > 0 for path in directory.rglob("*") if path.is_file()))
+
+
+def matching_folder(directory, names, wanted):
+    if not checked_files(directory, names):
+        return False
+    try:
+        record = json.loads((Path(directory) / MANIFEST).read_text())
+        return (record["signature"] == wanted and set(record["files"]) == set(names)
+                and all((Path(directory) / name).stat().st_size == size for name, size in record["files"].items()))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def check_sources(task):
+    for source in task["sources"]:
+        if identity(source["path"]) != source:
+            raise ValueError(f"Source changed during gridding: {source['path']}")
+
+
+def archive(path):
+    if not path.exists():
+        return
+    suffix = datetime.datetime.now().strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    target = path.with_name(path.name + ".previous-" + suffix)
+    path.rename(target)
+    report(f"Preserved incomplete work: {target}")
+
+
+def inspect_age(context, task):
+    wanted = signature(context, task)
+    finals = {category: folder(context, task, category) for category in task["outputs"]}
+    for category, final in finals.items():
+        if (final / MANIFEST).exists():
+            record = json.loads((final / MANIFEST).read_text())
+            if record.get("signature") != wanted:
+                raise ValueError(f"Existing published output is from different settings: {final}")
+    if all((matching_folder(finals[category], names, wanted) if (finals[category] / MANIFEST).exists()
+            else checked_files(finals[category], names)) for category, names in task["outputs"].items()):
+        if any(not (final / MANIFEST).exists() for final in finals.values()):
+            report(f"Existing {task['age']} Ma passes file existence/size checks (legacy output without manifests)")
+        return "published"
+    # A parent killed during the multi-directory rename may have published only
+    # some fields. Matching manifests allow the remaining renames to resume.
+    if all(matching_folder(finals[category], names, wanted)
+           or matching_folder(folder(context, task, category, True), names, wanted)
+           for category, names in task["outputs"].items()):
+        return "ready"
+    work = workspace(context, task)
+    work.parent.mkdir(parents=True, exist_ok=True)
+    work.mkdir(exist_ok=True)
+    with (work / ".worker.lock").open("a+") as lease:
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError(f"An earlier worker is still preparing {work}; wait before resuming") from error
+        for category, final in finals.items():
+            archive(final)
+            archive(folder(context, task, category, True))
+        # Do not archive a directory created just to check the lock.
+        if len(list(work.iterdir())) > 1:
+            archive(work)
+    return None
+
+
+def publish(context, task):
+    wanted = signature(context, task)
+    check_sources(task)
+    # Validate ALL fields, levels and optional products before the first rename.
+    for category, names in task["outputs"].items():
+        final = folder(context, task, category)
+        stage = folder(context, task, category, True)
+        if not matching_folder(final, names, wanted) and not matching_folder(stage, names, wanted):
+            raise ValueError(f"Missing, empty or unverified output for {task['age']} Ma: {category}")
+    for category in task["outputs"]:
+        final = folder(context, task, category)
+        stage = folder(context, task, category, True)
+        if final.exists():
+            if not matching_folder(final, task["outputs"][category], wanted):
+                raise ValueError(f"Refusing to replace unexpected final folder: {final}")
+            continue
+        stage.rename(final)
+    work = workspace(context, task)
+    work.mkdir(parents=True, exist_ok=True)
+    write_json(work / "age_published.json", {"signature": wanted, "age": task["age"], "timestep": task["timestep"]})
+    # Logs have their own completed name, matching the published age.
+    destination = work.with_name(f"{task['age']}Ma.complete")
+    if destination.exists():
+        archive(destination)
+    work.rename(destination)
+    report(f"Published all fields for {task['age']} Ma")
+
+
+def checked_callgmt(command, argument, opts="", redirect="", out=""):
+    # Stock isogmt wrappers can discard GMT's exit status. Age workspaces already
+    # isolate GMT files, so invoke gmt directly and preserve its real exit status.
+    parts = ["gmt " + command]
+    if argument:
+        parts.append(argument)
+    if opts:
+        parts.extend("-" + str(key) + str(value) for key, value in opts.items())
+    if redirect:
+        parts.append(redirect)
+    if out:
+        parts.append(out)
+    text = " ".join(parts)
+    if Core_isoGMT.verbose:
+        report(text)
+    return subprocess.check_output(text, shell=True, universal_newlines=True).rstrip()
+
+
+def interpolate(median_file, grid_file, options, region):
+    base = f"{median_file} -I{options.get('surface_I', '0.25')} -R{region}"
+    if any(key in options for key in ("Ll", "Lu", "T")):
+        # These are surface-specific limits/tension, not sphinterpolate options.
+        command = base + "".join(f" -{key}{options[key]}" for key in ("Ll", "Lu", "T") if key in options)
+        report("Using surface to honor configured limits/tension")
+        Core_isoGMT.callgmt("surface", command, "", "", " -G" + grid_file)
+    else:
+        try:
+            Core_isoGMT.callgmt("sphinterpolate", base, "", "", " -G" + grid_file)
+            if not nonempty(grid_file):
+                raise ValueError("sphinterpolate did not create a nonempty grid")
+        except (subprocess.CalledProcessError, ValueError) as error:
+            report(f"Spherical interpolation failed ({error}); using surface")
+            if Path(grid_file).exists():
+                Path(grid_file).unlink()
+            Core_isoGMT.callgmt("surface", base, "", "", " -G" + grid_file)
+    if not nonempty(grid_file):
+        raise ValueError(f"Interpolation did not produce a nonempty grid: {grid_file}")
+
+
+def initialize(context):
+    global CONTEXT
+    CONTEXT = context
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def prepare(task):
+    global _CASCADE_CONTEXT
+    context = CONTEXT
+    work = workspace(context, task)
+    work.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    previous = Path.cwd()
+    with (work / ".worker.lock").open("a+") as lease, (work / "grid.log").open("w", buffering=1) as log:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+            try:
+                os.chdir(work)
+                check_sources(task)
+                _CASCADE_CONTEXT = context
+                Core_isoGMT.callgmt = checked_callgmt
+                verbose = context["initialized"][0].get("verbose", False)
+                Core_Util.verbose = Core_Citcom.verbose = Core_isoGMT.verbose = verbose
+                times_parallel(task)
+                check_sources(task)
+                for category, names in task["outputs"].items():
+                    stage = folder(context, task, category, True)
+                    missing = [name for name in names if not nonempty(stage / name)]
+                    if missing:
+                        raise ValueError(f"Missing/empty outputs in {stage}: {missing}")
+                # Manifests are written only after every output for the age passes.
+                for category, names in task["outputs"].items():
+                    stage = folder(context, task, category, True)
+                    write_json(stage / MANIFEST, {"signature": signature(context, task),
+                        "age": task["actual_age"], "timestep": task["timestep"],
+                        "files": {name: (stage / name).stat().st_size for name in names}})
+                return {"ok": True, "seconds": time.monotonic() - started}
+            except (Exception, SystemExit) as error:
+                traceback.print_exc()
+                write_json(work / "failure.json", {"error": str(error), "timestep": task["timestep"]})
+                return {"ok": False, "error": str(error)}
+            finally:
+                os.chdir(previous)
+
+
+def cascade(context, tasks, workers, executor_factory=None):
+    make_workspace_visible(context)
+    states = [inspect_age(context, task) for task in tasks]
+    executor = (executor_factory() if executor_factory else ProcessPoolExecutor(max_workers=workers,
+        mp_context=multiprocessing.get_context("spawn"), initializer=initialize, initargs=(context,)))
+    futures, frontier, failed = {}, 0, False
+    try:
+        while frontier < len(tasks):
+            while frontier < len(tasks) and states[frontier] in ("published", "ready"):
+                if states[frontier] == "ready":
+                    publish(context, tasks[frontier])
+                    states[frontier] = "published"
+                else:
+                    report(f"Skipping completed {tasks[frontier]['age']} Ma")
+                frontier += 1
+            if frontier == len(tasks):
+                break
+            for index in range(frontier, min(frontier + workers, len(tasks))):
+                if states[index] is None:
+                    report(f"Starting {tasks[index]['age']} Ma, timestep {tasks[index]['timestep']}")
+                    futures[executor.submit(prepare, tasks[index])] = index
+                    states[index] = "running"
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                index = futures.pop(future)
+                try:
+                    result = future.result()
+                except (Exception, SystemExit) as error:
+                    result = {"ok": False, "error": str(error)}
+                states[index] = "ready" if result["ok"] else "failed"
+                if result["ok"]:
+                    report(f"Validated {tasks[index]['age']} Ma in {result['seconds']:.1f}s")
+                else:
+                    failed = True
+                    report(f"FAILED {tasks[index]['age']} Ma: {result['error']}; log: {workspace(context, tasks[index]) / 'grid.log'}")
+            if failed:
+                report("Stopping new work; running ages will finish into temporary folders")
+                break
+    except KeyboardInterrupt:
+        report("Interrupted; running ages will finish into temporary folders. Rerun to resume.")
+        failed = True
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True)
+    report(f"{states.count('published')}/{len(tasks)} ages published")
+    return 1 if failed else 0
+
+
+def load(config, command_workers=None):
+    global _CASCADE_CONTEXT
+    _CASCADE_CONTEXT = None
+    Core_Util.verbose = Core_Citcom.verbose = False
+    initialized = list(initialise_variables(str(Path(config).resolve())))
+    control, pid_file, master, coor, pid = initialized[:5]
+    workers = command_workers if command_workers is not None else control.get("procs", control.get("workers", control.get("cores", 1)))
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ValueError("procs must be a positive integer")
+    if not master.get("time_d") or not master.get("coor_d"):
+        raise ValueError("Master time and coordinate files are required")
+    if pid.get("output_format") != "ascii":
+        raise ValueError("Only ASCII processor data is supported")
+    for nodes, processors in (("nodex", "nprocx"), ("nodey", "nprocy"), ("nodez", "nprocz")):
+        if pid[processors] < 1 or pid[nodes] < 2 or (pid[nodes] - 1) % pid[processors]:
+            raise ValueError(f"Invalid mesh decomposition: {nodes}/{processors}")
+    if pid["nproc_surf"] != 12 and any(key not in pid for key in ("lon_min", "lon_max", "lat_min", "lat_max")):
+        raise ValueError("Regional models require lon_min, lon_max, lat_min and lat_max in the PID")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(pid["datafile"])) or str(pid["datafile"]) in (".", ".."):
+        raise ValueError("datafile must be a simple model filename prefix")
+    sections = control.get("_SECTIONS_", [])
+    if not sections:
+        raise ValueError("At least one field section is required")
+    levels = parse_levels(control["level_spec"], pid["nodez"])
+    if len(coor["depth_km"]) != pid["nodez"] or not np.isfinite(coor["depth_km"]).all():
+        raise ValueError("Invalid depth coordinate array")
+    for section in sections:
+        options = control[section]
+        if "field" not in options or file_field(options["field"]) not in Core_Citcom.field_to_file_map:
+            raise ValueError(f"Missing or unknown field in {section}")
+        component = Core_Citcom.field_to_file_map[file_field(options["field"])]["file"]
+        if component in ("surf", "botm") and levels != [pid["nodez"] - 1 if component == "surf" else 0]:
+            raise ValueError(f"{section} requires only its surface/bottom level")
+        if options.get("multiprocess_depths"):
+            report(f"{section}: multiprocess_depths is ignored; concurrency is bounded across ages")
+    # Read coordinates from this model. Never trust the old cwd-wide text caches.
+    if control.get("coord_dir"):
+        names = str(Path(control["coord_dir"]).resolve() / f"{pid['datafile']}.coord.#")
+        pid["coord_type"], pid["coord_file_in_use"] = Core_Citcom.read_citcom_coor_type(pid, names)
+    if pid.get("coord_type") not in ("proc", "cap"):
+        raise ValueError("Surface longitude/latitude extraction requires processor or cap coordinate files")
+    coordinate_template = pid["coord_file_in_use"]
+    coordinate_names, _ = Core_Citcom.define_cap_or_proc_names(pid, coordinate_template, pid["coord_type"])
+    for name in coordinate_names:
+        identity(name)
+    if pid["coord_type"] == "cap":
+        cap_data = Core_Citcom.read_cap_files_to_cap_list(pid, coordinate_template)
+        coords = [(np.degrees(row[1]), 90 - np.degrees(row[0]))
+                  for cap in cap_data for row in cap[::pid["nodez"]]]
+    else:
+        coords = Core_Util.flatten_nested_structure(Core_Citcom.read_citcom_surface_coor(pid))
+    lon, lat = np.asarray([row[0] for row in coords]), np.asarray([row[1] for row in coords])
+    if len(lon) != pid["nproc_surf"] * pid["nodex"] * pid["nodey"] or not np.isfinite(lon).all() or not np.isfinite(lat).all():
+        raise ValueError("Invalid surface coordinates")
+    root = Path.cwd()
+    output_root = root / str(pid["datafile"])
+    output_root.mkdir(exist_ok=True)
+    control["_grid_output_root"] = str(output_root)
+    initialized[1] = str(Path(pid_file).resolve())
+    for key in ("gplates_line_dir",):
+        if key in master["geoframe_d"]:
+            master["geoframe_d"][key] = str(Path(master["geoframe_d"][key]).resolve())
+    dimension_map = {}
+    if any(control[section].get("dimensional") for section in sections):
+        dimension_map = copy.deepcopy(Core_Citcom.populate_field_to_dimensional_map_from_pid(initialized[1], verbose=False))
+        for section in sections:
+            field = output_field(control[section]["field"])
+            if control[section].get("dimensional") and field not in dimension_map:
+                raise ValueError(f"No dimensionalization rule for {field}")
+    semantic_control = {key: value for key, value in control.items() if key not in ("cores", "workers", "procs", "time_spec", "verbose")}
+    code_hash = hashlib.sha256((Path(__file__).read_bytes()
+                               + Path(Core_Citcom.__file__).read_bytes() + Path(Core_isoGMT.__file__).read_bytes())).hexdigest()
+    context = {"initialized": initialized, "lon": lon, "lat": lat, "levels": levels,
+               "dimension_map": dimension_map, "output_root": str(output_root),
+               "signature": digest({"control": semantic_control, "pid": pid,
+                 "depths": coor["depth_km"], "coordinate_hash": hashlib.sha256(lon.tobytes() + lat.tobytes()).hexdigest(),
+                 "dimension_map": dimension_map, "code": code_hash})}
+    tasks = make_tasks(control, master, levels)
+    return context, tasks, workers
+
+
+def run(config, command_workers=None):
+    try:
+        # Cwd-level lock also protects separate configurations for the same model.
+        with open(".grid_maker_parallel.lock", "a+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise ValueError("Another grid maker is using this model directory") from error
+            context, tasks, workers = load(config, command_workers)
+            report(f"Oldest-first cascade: {len(tasks)} ages, up to {workers} workers")
+            for task in tasks:
+                report(f"Requested {task['requests']} -> {task['actual_age']:.6g} Ma, timestep {task['timestep']}")
+            return cascade(context, tasks, workers)
+    except (Exception, SystemExit) as error:
+        report(f"ERROR: {error}")
+        return 1
+    except KeyboardInterrupt:
+        report("Interrupted before processing started")
+        return 130
+
+
 def make_example_config_file( ):
     '''print to standard out an example configuration file for this script'''
 
@@ -902,6 +1032,9 @@ coord_dir = coord
 # NOTE: grid_maker.py will fail if coord files cannot be located
 
 # Optional global settings
+# Concurrent ages, processed and published oldest first:
+procs = 2
+# Incomplete outputs use <age>.inprogress folders. Rerun to resume.
 
 # If 'shift_lon' is set to True, then the grids will have data in the -180/+180 longitude range
 # The default is for data in the 0/360 longitude range.
@@ -994,7 +1127,7 @@ if __name__ == "__main__":
     # print ( str(sys.version_info) ) 
 
     # check for script called wih no arguments
-    if len(sys.argv) > 3:
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
         usage()
         sys.exit(-1)
 
@@ -1005,7 +1138,6 @@ if __name__ == "__main__":
 
 
     # run the main script workflow
-    main()
-    sys.exit(0)
+    sys.exit(main())
 #=====================================================================
 #=====================================================================
