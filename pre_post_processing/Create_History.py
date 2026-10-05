@@ -604,18 +604,23 @@ def main():
             status_thread.join( timeout=5 )
         #end function
 
-        # process the initial-condition age (always the oldest requested
-        # age) on its own, before any other age starts. Tracer IC
-        # generation in particular can be very memory-hungry, and that
-        # peak would otherwise land at exactly the moment every other
-        # worker is also starting up (its own heaviest point too) - the
-        # worst possible time for it. The IC age is also the one every
-        # other age's CitcomS run ultimately depends on, so a failure
-        # here is treated as critical and aborts the rest of this run
+        # if (and only if) an initial condition is actually requested
+        # (OUTPUT_TEMP_IC and/or OUTPUT_TRAC_IC), process the
+        # initial-condition age (always the oldest requested age) on its
+        # own, before any other age starts. Tracer IC generation in
+        # particular can be very memory-hungry, and that peak would
+        # otherwise land at exactly the moment every other worker is
+        # also starting up (its own heaviest point too) - the worst
+        # possible time for it. The IC age is also the one every other
+        # age's CitcomS run ultimately depends on, so a failure here is
+        # treated as critical and aborts the rest of this run
         # immediately rather than burning compute on ages built on top
         # of a broken initial condition.
+        # With no IC requested, every age (oldest included) goes
+        # straight into the parallel pool below.
+        ic_requested = bool( control_d.get('OUTPUT_TEMP_IC') or control_d.get('OUTPUT_TRAC_IC') )
         remaining_ages = age_loop
-        if oldest_age is not None:
+        if ic_requested and oldest_age is not None:
             print( now(), 'processing initial-condition age %s on its own first...' % oldest_age )
             print( now(), 'this is typically the slowest single age (tracer generation can be '
                            'memory- and time-intensive)' )
