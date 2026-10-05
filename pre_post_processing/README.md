@@ -23,5 +23,9 @@ The scrtipts will generate an example configuration with the optional -e argumen
 The modules are self-testing, and different tests may be enabled or disabled.
 See each module for details.
 
+For resumable, oldest-first parallel preparation of dynamic-topography restart
+inputs, see [restart_citcoms_parallel.md](restart_citcoms_parallel.md) and the
+[example configuration](sample_data/restart_citcoms_parallel.cfg). Set the
+concurrent age limit with `workers` in the configuration file.
 
 
