@@ -71,13 +71,18 @@ def initialise_variables(configFile=None,verbose=False):
     if configFile is None:
         configFile = sys.argv[1]
     # get the .cfg file as a dictionary
+    visible_directory(Path.cwd())
+    visible_file(configFile)
     control_d = Core_Util.parse_configuration_file( configFile, False, False )
+    if control_d.get("coord_dir"):
+        visible_directory(control_d["coord_dir"])
     
     print(f"{now()} Config file dictionary:")
     if verbose: Core_Util.tree_print( control_d )
 
     # set the pid file 
     pid_file = control_d['pid_file']
+    visible_pid(pid_file)
     
     # get the master dictionary and define aliases
     master_d = Core_Citcom.get_all_pid_data( pid_file, verbose=verbose )
@@ -489,8 +494,42 @@ def write_json(path, data):
     os.replace(temporary, path)
 
 
+def visible_directory(path):
+    """Reject hidden model directories, including targets of directory symlinks."""
+    path = Path(path).absolute()
+    for candidate in (path, path.resolve()):
+        if any(part.startswith(".") and part not in (".", "..") for part in candidate.parts):
+            raise ValueError(f"Hidden directories are not used by this workflow: {path}")
+    return path
+
+
+def visible_file(path):
+    path = Path(path).absolute()
+    visible_directory(path.parent)
+    visible_directory(path.resolve().parent)
+    return path
+
+
+def visible_pid(path):
+    visible_file(path)
+    settings = Core_Util.parse_configuration_file(str(path))
+    for key in ("datadir", "coor_file"):
+        if key in settings:
+            value = str(settings[key]).strip("\"'")
+            if key == "datadir":
+                visible_directory(value.replace("%RANK", "0").replace("#", "0"))
+            else:
+                visible_file(value)
+    if "datafile" in settings and "datadir" in settings:
+        datafile = str(settings["datafile"])
+        datadir = str(settings["datadir"]).strip("\"'").replace("%RANK", "0")
+        visible_file(f"{datafile}.time")
+        visible_file(Path(datadir) / f"{datafile}.time")
+        visible_file(Path(datadir) / f"{datafile}.coord.0")
+
+
 def identity(path):
-    path = Path(path).resolve()
+    path = visible_file(path).resolve()
     info = path.stat()
     if not path.is_file() or info.st_size <= 0:
         raise ValueError(f"Missing or empty input: {path}")
@@ -498,7 +537,7 @@ def identity(path):
 
 
 def nonempty(path):
-    path = Path(path)
+    path = visible_file(path)
     return path.is_file() and path.stat().st_size > 0
 
 
@@ -517,7 +556,7 @@ def parse_times(spec):
     text = str(spec).strip().strip("[]")
     if text.endswith(".dat"):
         requests = []
-        for line in Path(text).read_text().splitlines():
+        for line in visible_file(text).read_text().splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
                 requests.extend(parse_times(line))
@@ -565,6 +604,7 @@ def inventory(pid, field):
     directories += [str(Path(age) / "#") for age in sorted(glob.glob("Age*Ma"))]
     steps = {}
     for directory in dict.fromkeys(directories):
+        visible_directory(directory.replace("#", str(reference_rank)))
         zero = str(Path(directory.replace("#", str(reference_rank))) /
                    f"{pid['datafile']}.{component}.{reference_rank}.")
         found = {}
@@ -652,35 +692,17 @@ def signature(context, task):
 
 
 def workspace(context, task):
-    return Path(context["output_root"]) / "gridmaker-work" / f"{task['age']}Ma.inprogress"
-
-
-def make_workspace_visible(context):
-    old = Path(context["output_root"]) / ".gridmaker-work"
-    new = Path(context["output_root"]) / "gridmaker-work"
-    if not old.exists():
-        return
-    if new.exists():
-        raise ValueError(f"Both hidden and visible grid workspaces exist: {old}, {new}")
-    with contextlib.ExitStack() as leases:
-        for path in old.glob("*/.worker.lock"):
-            lease = leases.enter_context(path.open("a+"))
-            try:
-                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise ValueError(f"An earlier worker is still preparing {path.parent}; wait before renaming") from error
-        old.rename(new)
-    report(f"Made grid workspace visible: {new}")
+    return visible_directory(Path(context["output_root"]) / "gridmaker-work" / f"{task['age']}Ma.inprogress")
 
 
 def folder(context, task, category, temporary=False):
-    return Path(context["output_root"]) / category / (str(task["age"]) + (".inprogress" if temporary else ""))
+    return visible_directory(Path(context["output_root"]) / category / (str(task["age"]) + (".inprogress" if temporary else "")))
 
 
 def checked_files(directory, names):
-    directory = Path(directory)
+    directory = visible_directory(directory)
     return (all(nonempty(directory / name) for name in names)
-            and all(path.stat().st_size > 0 for path in directory.rglob("*") if path.is_file()))
+            and all(path.stat().st_size > 0 for path in directory.iterdir() if not path.name.startswith(".") and path.is_file()))
 
 
 def matching_folder(directory, names, wanted):
@@ -858,7 +880,6 @@ def prepare(task):
 
 
 def cascade(context, tasks, workers, executor_factory=None):
-    make_workspace_visible(context)
     states = [inspect_age(context, task) for task in tasks]
     executor = (executor_factory() if executor_factory else ProcessPoolExecutor(max_workers=workers,
         mp_context=multiprocessing.get_context("spawn"), initializer=initialize, initargs=(context,)))
@@ -888,7 +909,8 @@ def cascade(context, tasks, workers, executor_factory=None):
                     result = {"ok": False, "error": str(error)}
                 states[index] = "ready" if result["ok"] else "failed"
                 if result["ok"]:
-                    report(f"Validated {tasks[index]['age']} Ma in {result['seconds']:.1f}s")
+                    report(f"Validated {tasks[index]['age']} Ma in {result['seconds']:.1f}s"
+                           + ("; awaiting older ages before publication" if index > frontier else ""))
                 else:
                     failed = True
                     report(f"FAILED {tasks[index]['age']} Ma: {result['error']}; log: {workspace(context, tasks[index]) / 'grid.log'}")
@@ -910,7 +932,7 @@ def load(config, command_workers=None):
     global _CASCADE_CONTEXT
     _CASCADE_CONTEXT = None
     Core_Util.verbose = Core_Citcom.verbose = False
-    initialized = list(initialise_variables(str(Path(config).resolve())))
+    initialized = list(initialise_variables(str(visible_file(config))))
     control, pid_file, master, coor, pid = initialized[:5]
     workers = command_workers if command_workers is not None else control.get("procs", control.get("workers", control.get("cores", 1)))
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
@@ -961,13 +983,13 @@ def load(config, command_workers=None):
     if len(lon) != pid["nproc_surf"] * pid["nodex"] * pid["nodey"] or not np.isfinite(lon).all() or not np.isfinite(lat).all():
         raise ValueError("Invalid surface coordinates")
     root = Path.cwd()
-    output_root = root / str(pid["datafile"])
+    output_root = visible_directory(root / str(pid["datafile"]))
     output_root.mkdir(exist_ok=True)
     control["_grid_output_root"] = str(output_root)
     initialized[1] = str(Path(pid_file).resolve())
     for key in ("gplates_line_dir",):
         if key in master["geoframe_d"]:
-            master["geoframe_d"][key] = str(Path(master["geoframe_d"][key]).resolve())
+            master["geoframe_d"][key] = str(visible_directory(master["geoframe_d"][key]).resolve())
     dimension_map = {}
     if any(control[section].get("dimensional") for section in sections):
         dimension_map = copy.deepcopy(Core_Citcom.populate_field_to_dimensional_map_from_pid(initialized[1], verbose=False))
@@ -990,6 +1012,7 @@ def load(config, command_workers=None):
 def run(config, command_workers=None):
     try:
         # Cwd-level lock also protects separate configurations for the same model.
+        visible_directory(Path.cwd())
         with open(".grid_maker_parallel.lock", "a+") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

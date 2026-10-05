@@ -204,22 +204,30 @@ surface_I = 5
         self.assertFalse(context["initialized"][0]["debug"])
         self.assertFalse(any(name.endswith(".png") for names in tasks[0]["outputs"].values() for name in names))
 
-    def test_hidden_workspace_is_migrated_to_visible_name(self):
+    def test_hidden_work_is_ignored_even_when_locked(self):
         context, tasks, _ = self.load()
-        old = self.root / "model/.gridmaker-work"
-        age = old / "165Ma.inprogress"
-        age.mkdir(parents=True)
-        (age / "grid.log").write_text("retained log")
-        with (age / ".worker.lock").open("a+") as lease:
+        old = self.root / "model/.gridmaker-work/165Ma.inprogress"
+        old.mkdir(parents=True)
+        (old / "retained.log").write_text("old work")
+        with (old / ".worker.lock").open("a+") as lease:
             cascade.fcntl.flock(lease, cascade.fcntl.LOCK_EX)
-            with self.assertRaisesRegex(ValueError, "still preparing"):
-                cascade.make_workspace_visible(context)
-        with contextlib.redirect_stdout(io.StringIO()):
-            cascade.make_workspace_visible(context)
-        visible = cascade.workspace(context, tasks[0])
-        self.assertFalse(visible.parent.name.startswith("."))
-        self.assertFalse(old.exists())
-        self.assertEqual((visible / "grid.log").read_text(), "retained log")
+            with patch.object(cascade, "prepare", return_value={"ok": True, "seconds": 0}), \
+                 patch.object(cascade, "publish"), contextlib.redirect_stdout(io.StringIO()):
+                result = cascade.cascade(context, tasks, 1, lambda: ThreadPoolExecutor(max_workers=1))
+        self.assertEqual(result, 0)
+        self.assertEqual((old / "retained.log").read_text(), "old work")
+        self.assertTrue(old.is_dir())
+
+    def test_hidden_directories_and_symlink_targets_are_rejected(self):
+        hidden = self.root / ".hidden-data"
+        hidden.mkdir()
+        alias = self.root / "visible-alias"
+        alias.symlink_to(hidden, target_is_directory=True)
+        for path in (hidden, alias):
+            with self.assertRaisesRegex(ValueError, "Hidden directories"):
+                cascade.visible_directory(path)
+            with self.assertRaisesRegex(ValueError, "Hidden directories"):
+                cascade.visible_file(path / "input.dat")
 
     @unittest.skipUnless(shutil.which("gmt"), "GMT is not installed")
     def test_real_gmt_spawn_numerics_resume_and_zero_byte_repair(self):

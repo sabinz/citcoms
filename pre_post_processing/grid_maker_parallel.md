@@ -116,3 +116,9 @@ update before enabling `make_plate_frame_grid` with Python 3.
 Strict source row/header checks in the shared data reader and full-grid numerical
 validation remain useful improvements. Memory and I/O scaling still need a
 representative full-model benchmark; each age reads and assembles a full volume.
+
+Hidden workspaces and staging directories from earlier versions are ignored. They
+are never scanned, migrated, or resumed. Configured model inputs and output paths
+under hidden directories, including directory symlinks targeting hidden directories,
+are rejected. Old hidden folders are left untouched; their disk usage is not cleaned
+up automatically. Small hidden lock files remain for concurrency safety.

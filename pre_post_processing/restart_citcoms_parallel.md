@@ -106,3 +106,9 @@ Start with two workers and measure memory and wall time on a representative
 subset. Each active age still loads a full model volume and constructs cap and
 processor representations, so increasing workers also increases memory and I/O
 demand. Full-model speedup has not been benchmarked by these synthetic checks.
+
+Hidden workspaces and staging directories from earlier versions are ignored. They
+are never scanned, migrated, or resumed. Configured model inputs and output paths
+under hidden directories, including directory symlinks targeting hidden directories,
+are rejected. Old hidden folders are left untouched; their disk usage is not cleaned
+up automatically. Small hidden lock files remain for concurrency safety.

@@ -255,21 +255,30 @@ class RestartTests(unittest.TestCase):
                 with parallel.run_lock(self.root):
                     pass
 
-    def test_hidden_staging_is_migrated_to_visible_name(self):
-        task = {"folder": "restart_dynamic_topography_165Ma"}
+    def test_hidden_work_is_ignored_even_when_locked(self):
+        context, tasks, _ = self.load()
         old = self.root / ".restart_dynamic_topography_165Ma.inprogress"
-        old.mkdir()
-        (old / "prepare.log").write_text("retained log")
+        old.mkdir(parents=True)
+        (old / "retained.log").write_text("old work")
         with (old / ".prepare.lock").open("a+") as lease:
             parallel.fcntl.flock(lease, parallel.fcntl.LOCK_EX)
-            with self.assertRaisesRegex(ValueError, "still preparing"):
-                parallel.make_staging_visible(self.root, task)
-        with contextlib.redirect_stdout(io.StringIO()):
-            parallel.make_staging_visible(self.root, task)
-        visible = parallel.staging_path(self.root, task)
-        self.assertFalse(visible.name.startswith("."))
-        self.assertFalse(old.exists())
-        self.assertEqual((visible / "prepare.log").read_text(), "retained log")
+            with patch.object(parallel, "prepare_age", return_value={"ok": True, "seconds": 0}), \
+                 patch.object(parallel, "publish"), contextlib.redirect_stdout(io.StringIO()):
+                result = parallel.run_cascade(context, tasks, 1, lambda: ThreadPoolExecutor(max_workers=1))
+        self.assertEqual(result, 0)
+        self.assertEqual((old / "retained.log").read_text(), "old work")
+        self.assertTrue(old.is_dir())
+
+    def test_hidden_directories_and_symlink_targets_are_rejected(self):
+        hidden = self.root / ".hidden-data"
+        hidden.mkdir()
+        alias = self.root / "visible-alias"
+        alias.symlink_to(hidden, target_is_directory=True)
+        for path in (hidden, alias):
+            with self.assertRaisesRegex(ValueError, "Hidden directories"):
+                parallel.visible_directory(path)
+            with self.assertRaisesRegex(ValueError, "Hidden directories"):
+                parallel.visible_file(path / "input.dat")
 
     def test_live_worker_staging_is_not_archived(self):
         stage = self.root / "restart_dynamic_topography_165Ma.inprogress"
