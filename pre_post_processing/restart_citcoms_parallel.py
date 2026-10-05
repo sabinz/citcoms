@@ -303,7 +303,23 @@ def valid_manifest(directory, context, task):
 
 
 def staging_path(root, task):
-    return Path(root) / ("." + task["folder"] + ".inprogress")
+    return Path(root) / (task["folder"] + ".inprogress")
+
+
+def make_staging_visible(root, task):
+    old = Path(root) / ("." + task["folder"] + ".inprogress")
+    new = staging_path(root, task)
+    if not old.exists():
+        return
+    if new.exists():
+        raise ValueError(f"Both hidden and visible staging folders exist: {old}, {new}")
+    with (old / ".prepare.lock").open("a+") as lease:
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise ValueError(f"An earlier worker is still preparing {old}; wait before renaming") from error
+        old.rename(new)
+    report(f"Made staging folder visible: {new.name}")
 
 
 def initialize_worker(context):
@@ -417,6 +433,7 @@ def run_cascade(context, tasks, workers, executor_factory=None):
     states = [None] * len(tasks)
     # Validate all existing final folders before starting any new work.
     for index, task in enumerate(tasks):
+        make_staging_visible(root, task)
         final = root / task["folder"]
         if final.exists():
             if not valid_manifest(final, context, task):

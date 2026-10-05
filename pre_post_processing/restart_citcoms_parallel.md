@@ -28,7 +28,7 @@ ages are reported, sorted oldest first, and requests selecting the same timestep
 are merged. Distinct timesteps that round to the same integer-age folder cause
 an error rather than an overwrite.
 
-Each age is built inside `.restart_dynamic_topography_<age>Ma.inprogress/`:
+Each age is built inside `restart_dynamic_topography_<age>Ma.inprogress/`:
 
 - `ic_dir/` contains the modified processor velocity/temperature files.
 - `Age<age>Ma/` is the directory for the future solver outputs.

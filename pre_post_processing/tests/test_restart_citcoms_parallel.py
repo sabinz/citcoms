@@ -176,8 +176,8 @@ class RestartTests(unittest.TestCase):
         failure = self.cli()
         self.assertEqual(failure.returncode, 1, failure.stdout + failure.stderr)
         self.assertFalse(list(self.root.glob("restart_dynamic_topography_*Ma")))
-        self.assertTrue((self.root / ".restart_dynamic_topography_165Ma.inprogress/failure.json").is_file())
-        ready = self.root / ".restart_dynamic_topography_160Ma.inprogress"
+        self.assertTrue((self.root / "restart_dynamic_topography_165Ma.inprogress/failure.json").is_file())
+        ready = self.root / "restart_dynamic_topography_160Ma.inprogress"
         self.assertTrue((ready / parallel.MANIFEST).is_file(), failure.stdout + failure.stderr)
         ready_time = (ready / parallel.MANIFEST).stat().st_mtime_ns
         source.write_text(original)
@@ -186,7 +186,7 @@ class RestartTests(unittest.TestCase):
         self.assertIn("Reusing validated staging", success.stdout)
         final_manifest = self.root / "restart_dynamic_topography_160Ma" / parallel.MANIFEST
         self.assertEqual(final_manifest.stat().st_mtime_ns, ready_time)
-        self.assertTrue(list(self.root.glob(".restart_dynamic_topography_165Ma.inprogress.previous-*")))
+        self.assertTrue(list(self.root.glob("restart_dynamic_topography_165Ma.inprogress.previous-*")))
 
     def test_missing_input_preflight_and_existing_output_protection(self):
         missing = self.root / "data/1/model.velo.1.10"
@@ -255,8 +255,24 @@ class RestartTests(unittest.TestCase):
                 with parallel.run_lock(self.root):
                     pass
 
+    def test_hidden_staging_is_migrated_to_visible_name(self):
+        task = {"folder": "restart_dynamic_topography_165Ma"}
+        old = self.root / ".restart_dynamic_topography_165Ma.inprogress"
+        old.mkdir()
+        (old / "prepare.log").write_text("retained log")
+        with (old / ".prepare.lock").open("a+") as lease:
+            parallel.fcntl.flock(lease, parallel.fcntl.LOCK_EX)
+            with self.assertRaisesRegex(ValueError, "still preparing"):
+                parallel.make_staging_visible(self.root, task)
+        with contextlib.redirect_stdout(io.StringIO()):
+            parallel.make_staging_visible(self.root, task)
+        visible = parallel.staging_path(self.root, task)
+        self.assertFalse(visible.name.startswith("."))
+        self.assertFalse(old.exists())
+        self.assertEqual((visible / "prepare.log").read_text(), "retained log")
+
     def test_live_worker_staging_is_not_archived(self):
-        stage = self.root / ".restart_dynamic_topography_165Ma.inprogress"
+        stage = self.root / "restart_dynamic_topography_165Ma.inprogress"
         stage.mkdir()
         with (stage / ".prepare.lock").open("a+") as lease:
             parallel.fcntl.flock(lease, parallel.fcntl.LOCK_EX)
