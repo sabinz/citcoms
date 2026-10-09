@@ -367,7 +367,11 @@ def create_restart_run_cfg( master_run_pid_d, control_d, rs_replace_d, rs_dir, r
 
     # Write out the new input cfg dictionary, make input file readable & executable - RC
     cfg_name = rs_dir + '/' + master_run_datafile + '_' + rs_inp_cfg_suffix + '.input'
+    if rs_type == "dynamic_topography":
+        Core_Citcom.force_restart_checkpoint_frequency(restart_run_cfg_d)
     Core_Util.write_cfg_dictionary( restart_run_cfg_d, cfg_name, True)
+    if rs_type == "dynamic_topography":
+        Core_Citcom.check_restart_checkpoint_frequency(cfg_name)
     os.chmod(cfg_name , 0o775)
     
     # And return it 

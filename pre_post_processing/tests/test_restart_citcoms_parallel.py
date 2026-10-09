@@ -113,23 +113,39 @@ class RestartTests(unittest.TestCase):
     def test_serial_and_parallel_inputs_disable_checkpoint_output(self):
         context, tasks, _ = self.load()
         task = tasks[0]
+        context["replacements"]["CitcomS.controller.checkpointFrequency"] = 100000
         self.assertEqual(parallel.build_input(context, task)["checkpointFrequency"], 0)
         serial = self.root / "serial-checkpoint-test"
         serial.mkdir()
         template = dict(context["template"])
         template.update({"_SECTIONS_": [], "datafile": "model", "datadir": "data/%RANK",
                          "coor_file": "coor.dat", "lith_age_file": "age.dat",
-                         "slab_assim_file": "hist.dat", "checkpointFrequency": 1})
+                         "slab_assim_file": "hist.dat", "checkpointFrequency": 100000})
         control = {"restart_type": "dynamic_topography", "rs_datafile": "model", "rs_datadir": "./ic_dir"}
+        replacements = dict(Core_Citcom.dynamic_topography_restart_params)
+        replacements["CitcomS.controller.checkpointFrequency"] = 100000
         with contextlib.redirect_stdout(io.StringIO()):
             generated = restart_citcoms.create_restart_run_cfg(
-                template, control, dict(Core_Citcom.dynamic_topography_restart_params),
+                template, control, replacements,
                 str(serial), "test", task["age"], task["timestep"])
         self.assertEqual(generated["checkpointFrequency"], 0)
         with contextlib.redirect_stdout(io.StringIO()):
             parsed = Core_Util.parse_configuration_file(str(serial / "model_test.input"))
         self.assertEqual(parsed["checkpointFrequency"], 0)
-        self.assertEqual(Core_Citcom.total_topography_restart_params["CitcomS.controller.checkpointFrequency"], 0)
+        self.assertEqual(Core_Citcom.total_topography_restart_params["CitcomS.controller.checkpointFrequency"], 1)
+
+    def test_checkpoint_final_check_rejects_missing_or_conflicting_values(self):
+        path = self.root / "checkpoints.input"
+        for text in ("", "checkpointFrequency=100000\n", "checkpointFrequency=0\n[CitcomS.controller]\ncheckpointFrequency=100000\n"):
+            path.write_text(text)
+            with self.assertRaisesRegex(ValueError, "checkpointFrequency=0"):
+                Core_Citcom.check_restart_checkpoint_frequency(path)
+        path.write_text("# checkpointFrequency=100000\ncheckpointFrequency=0\n")
+        Core_Citcom.check_restart_checkpoint_frequency(path)
+        parameters = {"checkpointFrequency": 100000, "CitcomS.controller": {"checkpointFrequency": 100000}}
+        Core_Citcom.force_restart_checkpoint_frequency(parameters)
+        self.assertEqual(parameters["checkpointFrequency"], 0)
+        self.assertEqual(parameters["CitcomS.controller"]["checkpointFrequency"], 0)
 
     def test_coordinate_reference_comes_from_gridmaker_pid(self):
         template = self.root / "master.cfg"

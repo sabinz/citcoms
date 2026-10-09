@@ -187,11 +187,33 @@ field_to_dimensional_map = {
 # other parameter values are left as-is from the original input .cfg 
 
 # Total Topography Restarts  ( also called 'checkpoint' restarts)
+def force_restart_checkpoint_frequency(parameters):
+    """Apply the restart checkpoint policy after all inherited values/overrides."""
+    parameters["checkpointFrequency"] = 0
+    for value in parameters.values():
+        if isinstance(value, dict) and "checkpointFrequency" in value:
+            value["checkpointFrequency"] = 0
+
+
+def check_restart_checkpoint_frequency(filename):
+    """Verify every active assignment in the final file, including sections."""
+    values = []
+    with open(filename) as stream:
+        for line in stream:
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                key, value = line.split("=", 1)
+                if key.strip().rsplit(".", 1)[-1] == "checkpointFrequency":
+                    values.append(value.strip())
+    if not values or any(value != "0" for value in values):
+        raise ValueError(f"Generated restart must contain only checkpointFrequency=0: {filename}; found {values}")
+
+
 total_topography_restart_params = {
     'CitcomS.steps' : 'RS_TIMESTEP+2',
 
     'CitcomS.controller.monitoringFrequency' : 1,
-    'CitcomS.controller.checkpointFrequency' : 0,
+    'CitcomS.controller.checkpointFrequency' : 1,
 
     'CitcomS.solver.output.output_optional'  : 'surf,geoid,botm',
     'CitcomS.solver.output.self_gravitation' : 1,

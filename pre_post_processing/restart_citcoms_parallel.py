@@ -284,6 +284,7 @@ def build_input(context, task):
                 original = os.path.normpath(os.path.join("..", original))
             result[key] = original
     # Do not serialize framework sections or derived gridmaker parameters.
+    Core_Citcom.force_restart_checkpoint_frequency(result)
     result["_SECTIONS_"] = []
     if any(isinstance(value, str) and value.startswith("RS_") for value in result.values()):
         raise ValueError("Unresolved restart placeholder in generated input")
@@ -413,6 +414,7 @@ def prepare_age(task):
             config_path = stage / input_filename(context, task)
             expected = build_input(context, task)
             Core_Util.write_cfg_dictionary(expected, str(config_path), True)
+            Core_Citcom.check_restart_checkpoint_frequency(config_path)
             parsed = flat_parameters(Core_Util.parse_configuration_file(str(config_path)))
             wanted = flat_parameters(expected)
             if set(parsed) != set(wanted):
