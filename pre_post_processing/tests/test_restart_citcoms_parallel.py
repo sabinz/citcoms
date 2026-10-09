@@ -110,6 +110,27 @@ class RestartTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 parallel.requested_ages(spec)
 
+    def test_serial_and_parallel_inputs_disable_checkpoint_output(self):
+        context, tasks, _ = self.load()
+        task = tasks[0]
+        self.assertEqual(parallel.build_input(context, task)["checkpointFrequency"], 0)
+        serial = self.root / "serial-checkpoint-test"
+        serial.mkdir()
+        template = dict(context["template"])
+        template.update({"_SECTIONS_": [], "datafile": "model", "datadir": "data/%RANK",
+                         "coor_file": "coor.dat", "lith_age_file": "age.dat",
+                         "slab_assim_file": "hist.dat", "checkpointFrequency": 1})
+        control = {"restart_type": "dynamic_topography", "rs_datafile": "model", "rs_datadir": "./ic_dir"}
+        with contextlib.redirect_stdout(io.StringIO()):
+            generated = restart_citcoms.create_restart_run_cfg(
+                template, control, dict(Core_Citcom.dynamic_topography_restart_params),
+                str(serial), "test", task["age"], task["timestep"])
+        self.assertEqual(generated["checkpointFrequency"], 0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            parsed = Core_Util.parse_configuration_file(str(serial / "model_test.input"))
+        self.assertEqual(parsed["checkpointFrequency"], 0)
+        self.assertEqual(Core_Citcom.total_topography_restart_params["CitcomS.controller.checkpointFrequency"], 0)
+
     def test_coordinate_reference_comes_from_gridmaker_pid(self):
         template = self.root / "master.cfg"
         template.write_text(template.read_text().replace("coor_file=data/0/model.coord.0",
@@ -214,12 +235,48 @@ class RestartTests(unittest.TestCase):
         self.assertNotEqual(second.returncode, 0)
         self.assertIn("unverified", second.stdout)
 
-    def test_folder_collision_and_invalid_workers(self):
+    def test_sparse_outputs_skip_missing_requested_ages(self):
         context, _, _ = self.load()
         inventory = {10: str(self.root / "data/#/model.velo.#.10"),
                      20: str(self.root / "data/#/model.velo.#.20")}
-        with self.assertRaisesRegex(ValueError, "same folder"):
-            parallel.make_tasks([165.1, 165.2], [(10, 165.1, 0), (20, 165.2, 0)], inventory, context["pid"])
+        triples = [(10, 399.94, 0), (20, 389.96, 0)]
+        log = io.StringIO()
+        with contextlib.redirect_stdout(log):
+            tasks = parallel.make_tasks([400, 395, 390, 385], triples, inventory, context["pid"])
+        self.assertEqual([task["age"] for task in tasks], [400, 390])
+        self.assertEqual([task["requested_ages"] for task in tasks], [[400], [390]])
+        self.assertIn("Skipping requested 395 Ma", log.getvalue())
+        self.assertIn("Skipping requested 385 Ma", log.getvalue())
+        with self.assertRaisesRegex(ValueError, "No requested ages"), contextlib.redirect_stdout(io.StringIO()):
+            parallel.make_tasks([395], triples, inventory, context["pid"])
+
+    def test_initial_state_selects_exact_age_without_duplicate_restart(self):
+        context, _, _ = self.load()
+        inventory = {10: str(self.root / "data/#/model.velo.#.10"),
+                     20: str(self.root / "data/#/model.velo.#.20")}
+        tasks = parallel.make_tasks([400, 400], [(10, 400, 0), (20, 399.937, 0)], inventory, context["pid"])
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["timestep"], 10)
+        self.assertEqual(tasks[0]["folder"], "restart_dynamic_topography_400Ma")
+
+    def test_folder_collision_is_disambiguated_and_invalid_workers(self):
+        context, _, _ = self.load()
+        inventory = {10: str(self.root / "data/#/model.velo.#.10"),
+                     20: str(self.root / "data/#/model.velo.#.20")}
+        triples = [(10, 165.1, 0), (20, 165.2, 0)]
+        tasks = parallel.make_tasks([165.1, 165.2, 165.1], triples, inventory, context["pid"])
+        self.assertEqual([task["timestep"] for task in tasks], [20, 10])
+        self.assertEqual([task["folder"] for task in tasks],
+                         ["restart_dynamic_topography_165Ma_step20", "restart_dynamic_topography_165Ma_step10"])
+        self.assertEqual(tasks[1]["requested_ages"], [165.1, 165.1])
+        reordered = parallel.make_tasks([165.2, 165.1], triples, inventory, context["pid"])
+        self.assertEqual([task["folder"] for task in reordered], [task["folder"] for task in tasks])
+        for task in tasks:
+            with patch.object(parallel, "WORKER_CONTEXT", context):
+                result = parallel.prepare_age(task)
+            self.assertTrue(result["ok"], result)
+            parallel.publish(context, task)
+            self.assertTrue(parallel.valid_manifest(self.root / task["folder"], context, task))
         cfg = self.root / "restart.cfg"
         cfg.write_text(cfg.read_text().replace("workers = 2", "workers = 0"))
         with self.assertRaisesRegex(ValueError, "workers"):

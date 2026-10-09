@@ -196,15 +196,18 @@ def make_tasks(ages, triples, inventory, pid):
     if not available:
         raise ValueError("No velocity-file timesteps match the master time table")
     tasks = {}
-    folders = {}
     for requested in ages:
-        # Match reconstruction ages directly; ties select the younger available age.
-        timestep, actual_age = min(available, key=lambda item: (abs(item[1] - requested), item[1]))
+        # CitcomS outputs are slightly offset from nominal integer ages (e.g.
+        # 389.962 Ma is the 390 Ma output). Never borrow a different age's output.
+        label = int(np.around(requested))
+        candidates = [item for item in available if int(np.around(item[1])) == label]
+        if not candidates:
+            report(f"Skipping requested {requested:g} Ma: no available velocity output rounding to {label} Ma")
+            continue
+        timestep, actual_age = min(candidates,
+                                  key=lambda item: (abs(item[1] - requested), item[1], item[0]))
         age = int(np.around(actual_age))
         folder = f"restart_dynamic_topography_{age}Ma"
-        if folder in folders and folders[folder] != timestep:
-            raise ValueError(f"Different timesteps round to the same folder {folder}")
-        folders[folder] = timestep
         if timestep in tasks:
             tasks[timestep]["requested_ages"].append(requested)
             continue
@@ -214,6 +217,17 @@ def make_tasks(ages, triples, inventory, pid):
         tasks[timestep] = {"age": age, "actual_age": actual_age, "timestep": timestep,
                            "requested_ages": [requested], "folder": folder,
                            "source_pattern": pattern, "sources": sources}
+    if not tasks:
+        raise ValueError("No requested ages have matching available velocity outputs")
+    # Disambiguate every member of a collision group, independent of request order.
+    # Internal filenames may retain the rounded age: each restart has its own root.
+    groups = {}
+    for task in tasks.values():
+        groups.setdefault(task["folder"], []).append(task)
+    for folder, group in groups.items():
+        if len(group) > 1:
+            for task in group:
+                task["folder"] = f"{folder}_step{task['timestep']}"
     return sorted(tasks.values(), key=lambda item: (-item["actual_age"], item["timestep"]))
 
 

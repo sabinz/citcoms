@@ -22,11 +22,20 @@ master coordinate/time files must be available as for the serial workflow.
 
 ## Scheduling and completed folders
 
-Requested ages are matched to the nearest age with an available velocity
-timestep in the master time table; ties choose the younger age. The resolved
-ages are reported, sorted oldest first, and requests selecting the same timestep
-are merged. Distinct timesteps that round to the same integer-age folder cause
-an error rather than an overwrite.
+Requested ages select only available velocity-file timesteps whose actual ages
+round to the requested age's integer Ma label. For example, 389.962 Ma matches
+390 Ma, but is never used for a missing 385 Ma output. Missing ages are logged
+and skipped; if none match, the script reports an error. Among matching outputs,
+the closest age is selected; ties choose the younger age, then the lowest step.
+A request for 400 Ma therefore prefers an available exact 400 Ma initial state
+over step 1 at 399.937 Ma.
+
+Selections are reported and sorted oldest first. Requests selecting the same
+step are merged. Distinct selected steps sharing a rounded age (possible with
+fractional-age requests) receive `_step<TIMESTEP>` folder suffixes. Noncolliding
+folder names and the existing rounded solver start-age convention are unchanged.
+All processor inputs for a selected timestep must exist and be nonempty; partial
+source output fails preflight rather than generating an incomplete restart.
 
 Each age is built inside `restart_dynamic_topography_<age>Ma.inprogress/`:
 
@@ -112,3 +121,14 @@ are never scanned, migrated, or resumed. Configured model inputs and output path
 under hidden directories, including directory symlinks targeting hidden directories,
 are rejected. Old hidden folders are left untouched; their disk usage is not cleaned
 up automatically. Small hidden lock files remain for concurrency safety.
+
+## Checkpoint setting in generated inputs
+
+Both serial and parallel restart generators default to `checkpointFrequency=0`
+through the shared restart settings in `Core_Citcom.py`. Explicit cfg overrides
+still take precedence. Existing generated inputs must be regenerated or edited;
+the generator does not patch published restarts automatically.
+
+This only changes generated inputs. The current C solver source writes an initial
+checkpoint unconditionally and uses this value as a modulo divisor, so zero is
+not a safe disable setting for an executable built from that source.

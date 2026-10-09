@@ -191,7 +191,7 @@ total_topography_restart_params = {
     'CitcomS.steps' : 'RS_TIMESTEP+2',
 
     'CitcomS.controller.monitoringFrequency' : 1,
-    'CitcomS.controller.checkpointFrequency' : 1,
+    'CitcomS.controller.checkpointFrequency' : 0,
 
     'CitcomS.solver.output.output_optional'  : 'surf,geoid,botm',
     'CitcomS.solver.output.self_gravitation' : 1,
@@ -219,7 +219,7 @@ dynamic_topography_restart_params = {
     'CitcomS.steps' : 'RS_TIMESTEP',
     
     'CitcomS.controller.monitoringFrequency' : 1,
-    'CitcomS.controller.checkpointFrequency' : 1,
+    'CitcomS.controller.checkpointFrequency' : 0,
     
     # Added item - RC
     'CitcomS.solver.stokes_flow_only' : '0',
